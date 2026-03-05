@@ -153,6 +153,28 @@ def disable_route_checker_module(duthosts, rand_one_dut_hostname):
         yield func
 
 
+@pytest.fixture
+def disable_route_checker_all_frontend_per_test(tbinfo, duthosts):
+    """
+    Stop routeCheck on all frontend DUTs before each test (chassis t2/ut2/lt2 only).
+
+    Use with pytest.mark.disable_route_check. When rollback_or_reload() triggers
+    config_reload(), routeCheck is re-enabled on that DUT; this re-disables it
+    on all frontend nodes before the next test. Restart is done by conftest's
+    temporarily_disable_route_check at module teardown.
+    """
+    allowed_topologies = {"t2", "ut2", "lt2"}
+    topo_name = tbinfo['topo']['name']
+    if topo_name in allowed_topologies:
+        logger.info("Stopping route check monitor before test case")
+        with SafeThreadPoolExecutor(max_workers=8) as executor:
+            for duthost in duthosts.frontend_nodes:
+                executor.submit(stop_route_checker_on_duthost, duthost, wait_for_status=True)
+    else:
+        logger.info("Topology %s is not allowed for disable_route_checker_all_frontend_per_test", topo_name)
+    yield
+
+
 @pytest.fixture(scope='module')
 def disable_fdb_aging(duthost):
     """
