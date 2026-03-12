@@ -122,6 +122,8 @@ def dhcp_relay_config_hooks():
 def dhcp_setup_verify_ipv4(linksel=False):
     vars = st.get_testbed_vars()
 
+    vxlan_obj.reboot_ports(['1/' + vars.T1D3P1])
+
     # DHCP Server Config with switch
     tg2, tg_ph_2 = tgapi.get_handle_byname("T1D3P2")
     h1 = tg2.tg_interface_config(port_handle=tg_ph_2, mode='config', intf_ip_addr=dhcpserver_ipv4, gateway=dhcpserver_vlan_ipv4_addr, src_mac_addr=dhcpserverv4_mac_addr,
@@ -179,6 +181,9 @@ def dhcp_setup_verify_ipv4(linksel=False):
                     st.log("dhcp relay ipv4 basic fail on assigning the ip")
                     return False
 
+    tg1.tg_emulation_dhcp_config(mode='reset', port_handle=tg_ph_1, handle=conf1['handles'])
+    tg2.tg_topology_config(device_group_handle='/'.join(s_conf2['dhcp_handle'].split('/')[:3]), mode='destroy')
+
     st.log("dhcp relay ipv4 basic pass on assigning the ip")
 
     return True 
@@ -186,6 +191,8 @@ def dhcp_setup_verify_ipv4(linksel=False):
 
 def dhcp_setup_verify_ipv6():
     vars = st.get_testbed_vars()
+
+    vxlan_obj.reboot_ports(['1/' + vars.T1D4P1])
 
     # DHCP Server Config with switch
     tg4, tg_ph_4 = tgapi.get_handle_byname("T1D4P2")
@@ -222,6 +229,9 @@ def dhcp_setup_verify_ipv6():
 
     rst3 = tg3.tg_emulation_dhcp_stats(port_handle=tg_ph_3, handle=conf3['handles'], mode='session', ip_version='6')
     st.log("dhcp relay ipv6 basic client result {}".format(rst3))
+
+    tg3.tg_emulation_dhcp_config(mode='reset', port_handle=tg_ph_3, handle=conf3['handles'])
+    tg4.tg_topology_config(device_group_handle='/'.join(s_conf4['dhcp_handle'].split('/')[:3]), mode='destroy')
 
     for key, val in rst3.items():
         if key == 'session':

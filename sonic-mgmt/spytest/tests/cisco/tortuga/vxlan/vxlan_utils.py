@@ -1,4 +1,5 @@
 from spytest import st, tgapi
+from spytest.tgen.tg import get_ixnet, get_ixiangpf
 import tgen_utils_cmn as tgen_utils
 import yaml
 import os
@@ -1117,3 +1118,58 @@ def check_bullseye(node):
         return True
 
     return False
+
+
+def reboot_ports(ports, desiredStatus="up", timeout=60):
+
+    ixiangpf = get_ixiangpf()
+    ixNet = get_ixnet()
+    vportList = []
+
+    for port in ports:
+        result = ixiangpf.convert_porthandle_to_vport(port_handle = port)
+        vport = result['handle']
+        vportList.append(vport)
+
+    jobs = []
+    for vp in vportList:
+        jobs.append(ixNet.setAsync().execute('resetPortCpu', vp))
+
+    for j in jobs:
+        st.log(j + ' ' + ixNet.getResult(j))
+    st.log("Done... Ports are rebooted...")
+
+    st.wait(1)  # give the port some time to begin it's in autonegotiate mode or PPP
+
+    linkState = {}
+
+    # go through all the ports and label the ones whose links are not as desieredStatus
+    for vport in vportList:
+        state = ixNet.getAttribute(vport, '-state')
+        if state != desiredStatus:
+            linkState[vport] = state
+        elif ixNet.getAttribute(vport, '-isConnected') == "false":
+            linkState[vport] = state
+        st.log("Port {} is in state {}".format(vport, state))
+
+    # the linkState array are all the ports whose links are not desired. Now poll
+    # them a few times until they are all desired or return.
+    loopCount = timeout
+    all_link_up = 1
+    for ctr in range(0, loopCount):
+        for downlink in list(linkState.keys()):
+            if linkState[downlink] == "down":
+                all_link_up = 0
+                state = ixNet.getAttribute(downlink, '-state')
+                if state == desiredStatus:
+                    if ixNet.getAttribute(vport, '-isConnected') == "false":
+                        continue
+                    linkState[downlink] = state
+        if all_link_up:
+            break
+        else:
+            st.wait(1)
+    if all_link_up == 0:
+        st.error("Not all link ports are up.")
+        return 0
+    return 1

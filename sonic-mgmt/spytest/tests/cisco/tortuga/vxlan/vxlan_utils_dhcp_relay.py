@@ -87,6 +87,7 @@ VRF_NAME2 = "Vrf102"
 
 def dhcp_l3vni_ipv4_setup_server_client(dual_servers=True, linksel=True, leaf0_clients=0, dual_clients=0, client_cleanup=True):
     vars = st.get_testbed_vars()
+    vxlan_obj.reboot_ports(['1/' + vars["T1D3P1"], '1/' + vars["T1D4P1"]])
 
     st.log("Start to create L3VNI DHCP Server leaf0_clients={} dual_clients={}".format(leaf0_clients, dual_clients))
 
@@ -158,10 +159,10 @@ def dhcp_l3vni_ipv4_setup_server_client(dual_servers=True, linksel=True, leaf0_c
         result = dhcp_l3vni_ipv4_setup_client('T1D4P1', dhcpv4_mac_addr_b1, dhcp_ipv4_set_b2, client_cleanup)
 
 
-    tg4.tg_emulation_dhcp_server_config(mode='reset', handle=s_conf4['dhcp_handle'], port_handle=tg_ph_4)
+    tg4.tg_topology_config(device_group_handle='/'.join(s_conf4['dhcp_handle'].split('/')[:3]), mode='destroy')
 
     if dual_servers:
-        tg3.tg_emulation_dhcp_server_config(mode='reset', handle=s_conf3['dhcp_handle'], port_handle=tg_ph_3)
+        tg3.tg_topology_config(device_group_handle='/'.join(s_conf3['dhcp_handle'].split('/')[:3]), mode='destroy')
 
     return result
 

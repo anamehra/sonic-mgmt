@@ -180,8 +180,6 @@ def dhcp_relay_config_hooks():
             common_obj.config_static(node, 'sonic', True, updated_config_file)
             st.wait(2)
 
-    dhcp_setup_ipv4_servers(linksel=True, mserver=True)
-
     yield dhcp_relay_config_hooks
 
     with open(updated_config_file) as c:
@@ -194,11 +192,13 @@ def dhcp_relay_config_hooks():
 
 
 
-def dhcp_setup_ipv4_servers(linksel=False, mserver=True):
+@pytest.fixture(scope="function", autouse=True)
+def dhcp_setup_ipv4_servers(linksel=True, mserver=True):
     vars = st.get_testbed_vars()
 
     # DHCP Server A
 
+    vxlan_obj.reboot_ports(['1/' + vars.T1D3P1])
     tg2, tg_ph_2 = tgapi.get_handle_byname("T1D3P2")
     h2 = tg2.tg_interface_config(port_handle=tg_ph_2, mode='config', intf_ip_addr=dhcpserver_ipv4_a, gateway=dhcp_vlan_ipv4_addr2, 
                                 src_mac_addr=dhcp_mac_addr2, arp_send_req='1', control_plane_mtu='9100', vlan='1', vlan_id=dhcp_vlan2,
@@ -251,6 +251,12 @@ def dhcp_setup_ipv4_servers(linksel=False, mserver=True):
         s_con4 = tg4.tg_emulation_dhcp_server_control(action='connect', dhcp_handle=s_conf4['dhcp_handle'])
         st.log("dhcp relay ipv4 basic server B control {}".format(s_con4))
 
+    yield dhcp_setup_ipv4_servers
+
+    tg2.tg_topology_config(device_group_handle='/'.join(s_conf2['dhcp_handle'].split('/')[:3]), mode='destroy')
+
+    if mserver:
+        tg4.tg_topology_config(device_group_handle='/'.join(s_conf4['dhcp_handle'].split('/')[:3]), mode='destroy')
 
 
 def dhcp_setup_ipv4_clients_verify(mhost=False, mclients=2):
@@ -330,8 +336,11 @@ def dhcp_setup_ipv4_clients_verify(mhost=False, mclients=2):
                         return False
                     else:
                         cnt_b = cnt_b + 1 
-    
-    
+
+        tg3.tg_emulation_dhcp_config(mode='reset', handle=conf3['handles'], port_handle=tg_ph_3)
+
+    tg1.tg_emulation_dhcp_config(mode='reset', handle=conf1['handles'], port_handle=tg_ph_1)
+
     st.log("dhcp relay full PASS cnt_a={} cnt_b={} cnt_c={}".format(cnt_a, cnt_b, cnt_c))
     
     return True 

@@ -108,6 +108,8 @@ def dhcp_l2vni_ipv4_setup_and_verification():
 
     vars = st.get_testbed_vars()
 
+    vxlan_obj.reboot_ports(['1/' + vars.T1D3P1, '1/' + vars.T1D4P1])
+
     # DHCP Server Config with switch
     tg2, tg_ph_2 = tgapi.get_handle_byname("T1D4P1")
     h2 = tg2.tg_interface_config(port_handle=tg_ph_2, mode='config', intf_ip_addr=dhcpserver_ipv4, gateway=dhcpserver_vlan_ipv4_addr, src_mac_addr=dhcpserverv4_mac_addr,
@@ -156,6 +158,9 @@ def dhcp_l2vni_ipv4_setup_and_verification():
                 if val2['Address'] not in dhcp_ipv4_set:
                     st.log("EVPN l2vni dhcp ipv4 basic fails on assigning the ip")
                     return False
+
+    tg1.tg_emulation_dhcp_config(mode='reset', port_handle=tg_ph_1, handle=conf1['handles'])
+    tg2.tg_topology_config(device_group_handle='/'.join(s_conf2['dhcp_handle'].split('/')[:3]), mode='destroy')
 
     st.log("EVPN l2vni dhcp ipv4 basic pass on assigning the ip")
 

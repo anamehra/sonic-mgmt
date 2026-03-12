@@ -106,8 +106,6 @@ def dhcp_relay_config_hooks():
             common_obj.config_static(node, 'sonic', True, updated_config_file)
             st.wait(2)
 
-    dhcp_setup_ipv4_servers(linksel=True, mserver=True)
-
     yield dhcp_relay_config_hooks
 
     with open(updated_config_file) as c:
@@ -119,12 +117,15 @@ def dhcp_relay_config_hooks():
     vxlan_obj.remove_temp_config(updated_config_file)
 
 
-
-def dhcp_setup_ipv4_servers(linksel=False, mserver=True):
+@pytest.fixture(scope="function", autouse=True)
+def dhcp_setup_ipv4_servers():
     vars = st.get_testbed_vars()
+    linksel=True
+    mserver=True
 
+
+    vxlan_obj.reboot_ports(['1/' + vars.T1D3P1])
     # DHCP Server A
-
     tg2, tg_ph_2 = tgapi.get_handle_byname("T1D3P2")
 
     h2 = tg2.tg_interface_config(port_handle=tg_ph_2, mode='config', intf_ip_addr=dhcpserver_ipv4_a, gateway=dhcp_vlan_ipv4_addr2, 
@@ -177,6 +178,13 @@ def dhcp_setup_ipv4_servers(linksel=False, mserver=True):
 
         s_con4 = tg4.tg_emulation_dhcp_server_control(action='connect', dhcp_handle=s_conf4['dhcp_handle'])
         st.log("dhcp relay ipv4 basic server B control {}".format(s_con4))
+
+    yield dhcp_setup_ipv4_servers
+
+    tg2.tg_topology_config(device_group_handle='/'.join(s_conf2['dhcp_handle'].split('/')[:3]), mode='destroy')
+
+    if mserver:
+        tg4.tg_topology_config(device_group_handle='/'.join(s_conf4['dhcp_handle'].split('/')[:3]), mode='destroy')
 
 
 

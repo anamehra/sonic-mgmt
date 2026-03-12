@@ -110,6 +110,8 @@ def dhcp_l2vni_ipv6_setup_and_verification():
     nodes['leaf0'] = vars.D3
     nodes['leaf1'] = vars.D4
 
+    vxlan_obj.reboot_ports(['1/' + vars.T1D3P1, '1/' + vars.T1D4P1])
+
     # Test remote vtep status on LEAF0 and LEAF1
     vxlan_obj.verify_vtep_state_v6(nodes, LEAF0_VTEP_IP, LEAF1_VTEP_IP)
 
@@ -158,6 +160,9 @@ def dhcp_l2vni_ipv6_setup_and_verification():
                 if val2['Address'] not in dhcp_ipv6_set:
                     st.log("EVPN L2VNI dhcp ipv6 basic fails on assigning the ip")
                     return False
+
+    tg3.tg_emulation_dhcp_config(mode='reset', port_handle=tg_ph_3, handle=conf3['handles'])
+    tg4.tg_topology_config(device_group_handle='/'.join(s_conf4['dhcp_handle'].split('/')[:3]), mode='destroy')
 
     st.log("EVPN L2VNI dhcp ipv6 basic pass on assigning the ip")
 
