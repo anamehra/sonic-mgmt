@@ -26,6 +26,7 @@ FORWARDING_TESTCASES = [
     'reporting/suites/tortuga',
     'reporting/suites/tortuga_parallel',
     'reporting/suites/apple-cvt-ipfabric',
+    'reporting/suites/tortuga_gamut',
 ]
 
 def load_json(filepath):

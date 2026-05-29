@@ -899,6 +899,160 @@
                 "sudo rm /etc/sonic/config_db.json || true"
             ]
         },
+        "b2b-ucs-l9-gamut0": {
+            "ucs_host_name":"gamut-ucs-l9",
+            "ucs_host": "172.25.168.181",
+            "ucs_username": "sonic",
+            "ucs_password": "roZes@123",
+            "telnet_host": ["172.25.168.65"],
+            "telnet_port": ["2003"],
+            "telnet_details": ["172.25.168.65 2003"],
+            "dut_ssh": ["172.25.168.170"],
+            "ucs_ssh_prompt": "sonic@gamut-ucs-l9",
+            "docker_prompt":"root@gamut-ucs-l9",
+            "dut_ssh_prompt": "admin@172.25.168.170",
+            "sonic_mgmt_container_202505": "ixia_sonic_mgmt_gamut",
+            "sonic_test_dir": "/home/sonic/cicd2/run_logs",
+            "installer_mode": "sonic",
+            "skip_tests": "",
+            "skip_folder":"",
+            "git_update_flag": "true",
+            "tests_list": ["cisco/test_platform.py", "cisco/tortuga/security/cisco-security-uefi.py", "cisco/tortuga/security/cisco-security-test.py"],
+            "hw_type":"gamut",
+            "run_type_check": "spytest",
+            "allure_flag": "false",
+            "collect_spytest_flag":"true",
+            "sonic_installer_commands":[
+                "sudo rm /image-*/old_config/config_db.json || true",
+                "sudo rm /image-*/image-*/persistent_data/etc_sonic/config_db.json || true",
+                "sudo rm /image-*/image-*/persistent_data/etc_sonic/old_config/config_db.json || true",
+                "sudo sonic-installer install $image_url -y",
+                "sudo sonic-installer list",
+                "sudo sonic-installer set-next-boot",
+                "sudo rm /etc/sonic/config_db.json || true"
+            ],
+            "optional_run_params": {
+                "optional_params":{
+                    "default": "",
+                    "cisco/tortuga/security/cisco-security-uefi-key-plugin.py": "--skip-init-checks",
+                    "cisco/test_platform.py": "-m alpha"
+                },
+                "testbed_yaml": {
+                    "default": "/data/spytest_tb_files/gamut_topo.yaml",
+                    "forwarding": "/data/spytest_tb_files/gamut_topo.yaml",
+                    "reporting/suites/tortuga_gamut": "/data/spytest_tb_files/gamut_topo.yaml"
+                }
+            },
+            "special_run_commands": [
+                "cd /data/sonic-mgmt/spytest",
+                "./bin/spytest --testbed $testbed_yaml --device-feature-group master $optional_params --module-init-max-timeout=7200 --tc-max-timeout=7200 /data/sonic-mgmt/spytest/tests/$test_name --logs-path /run_logs/$image_folder",
+                "ls -l"
+            ]
+        },
+        "b2b-ucs-l9-gamut1": {
+            "ucs_host_name":"gamut-ucs-l9",
+            "ucs_host": "172.25.168.181",
+            "ucs_username": "sonic",
+            "ucs_password": "roZes@123",
+            "telnet_host": ["172.25.168.71"],
+            "telnet_port": ["2007"],
+            "telnet_details": ["172.25.168.71 2007"],
+            "dut_ssh": ["172.25.168.166"],
+            "ucs_ssh_prompt": "sonic@gamut-ucs-l9",
+            "docker_prompt":"root@gamut-ucs-l9",
+            "dut_ssh_prompt": "admin@172.25.168.166",
+            "sonic_mgmt_container_202505": "ixia_sonic_mgmt_gamut",
+            "installer_mode": "sonic",
+            "hw_type":"gamut",
+            "git_update_flag": "false",
+            "run_type_check": "spytest",
+            "allure_flag": "false",
+            "sonic_installer_commands":[
+                "sudo rm /image-*/old_config/config_db.json || true",
+                "sudo rm /image-*/image-*/persistent_data/etc_sonic/config_db.json || true",
+                "sudo rm /image-*/image-*/persistent_data/etc_sonic/old_config/config_db.json || true",
+                "sudo sonic-installer install $image_url -y",
+                "sudo sonic-installer list",
+                "sudo sonic-installer set-next-boot",
+                "sudo rm /etc/sonic/config_db.json || true"
+            ]
+        },
+        "b2b-ucs-l9-gamut2": {
+            "ucs_host_name":"gamut-ucs-l9",
+            "ucs_host": "172.25.168.181",
+            "ucs_username": "sonic",
+            "ucs_password": "roZes@123",
+            "telnet_host": ["172.25.168.71"],
+            "telnet_port": ["2006"],
+            "telnet_details": ["172.25.168.71 2006"],
+            "dut_ssh": ["172.25.168.167"],
+            "ucs_ssh_prompt": "sonic@gamut-ucs-l9",
+            "docker_prompt":"root@gamut-ucs-l9",
+            "dut_ssh_prompt": "admin@172.25.168.167",
+            "sonic_mgmt_container_202505": "ixia_sonic_mgmt_gamut",
+            "installer_mode": "sonic",
+            "hw_type":"gamut",
+            "git_update_flag": "false",
+            "run_type_check": "spytest",
+            "allure_flag": "false",
+            "docker_count": "17",
+            "extra_sonic_commands": [
+                "",
+                "sudo config interface breakout Ethernet1_14 '2x400G' -yf",
+                "sudo config int startup Ethernet1_14_1",
+                "sudo config int startup Ethernet1_14_2",
+                "sudo config interface breakout Ethernet1_15 '2x400G' -yf",
+                "sudo config int startup Ethernet1_15_1",
+                "sudo config int startup Ethernet1_15_2"
+            ],
+            "sonic_installer_commands":[
+                "sudo rm /image-*/old_config/config_db.json || true",
+                "sudo rm /image-*/image-*/persistent_data/etc_sonic/config_db.json || true",
+                "sudo rm /image-*/image-*/persistent_data/etc_sonic/old_config/config_db.json || true",
+                "sudo sonic-installer install $image_url -y",
+                "sudo sonic-installer list",
+                "sudo sonic-installer set-next-boot",
+                "sudo rm /etc/sonic/config_db.json || true"
+            ]
+        },
+        "b2b-ucs-l9-gamut3": {
+            "ucs_host_name":"gamut-ucs-l9",
+            "ucs_host": "172.25.168.181",
+            "ucs_username": "sonic",
+            "ucs_password": "roZes@123",
+            "telnet_host": ["172.25.168.71"],
+            "telnet_port": ["2005"],
+            "telnet_details": ["172.25.168.71 2005"],
+            "dut_ssh": ["172.25.168.168"],
+            "ucs_ssh_prompt": "sonic@gamut-ucs-l9",
+            "docker_prompt":"root@gamut-ucs-l9",
+            "dut_ssh_prompt": "admin@172.25.168.168",
+            "sonic_mgmt_container_202505": "ixia_sonic_mgmt_gamut",
+            "installer_mode": "sonic",
+            "hw_type":"gamut",
+            "git_update_flag": "false",
+            "run_type_check": "spytest",
+            "allure_flag": "false",
+            "docker_count": "17",
+            "extra_sonic_commands": [
+                "",
+                "sudo config interface breakout Ethernet1_14 '2x400G' -yf",
+                "sudo config int startup Ethernet1_14_1",
+                "sudo config int startup Ethernet1_14_2",
+                "sudo config interface breakout Ethernet1_15 '2x400G' -yf",
+                "sudo config int startup Ethernet1_15_1",
+                "sudo config int startup Ethernet1_15_2"
+            ],
+            "sonic_installer_commands":[
+                "sudo rm /image-*/old_config/config_db.json || true",
+                "sudo rm /image-*/image-*/persistent_data/etc_sonic/config_db.json || true",
+                "sudo rm /image-*/image-*/persistent_data/etc_sonic/old_config/config_db.json || true",
+                "sudo sonic-installer install $image_url -y",
+                "sudo sonic-installer list",
+                "sudo sonic-installer set-next-boot",
+                "sudo rm /etc/sonic/config_db.json || true"
+            ]
+        },
         "b2b-m3-2-m64": {
             "ucs_host_name":"sonic-ucs-m3-2", 
             "ucs_host": "172.27.146.35", 
@@ -2687,6 +2841,18 @@
             "cisco.202405c.2.2.5.ztp.apple",
             "cisco.202405cz.2.2.ztp.release"
         ],
+        "b2b-ucs-l9-gamut0":  [
+            "cisco.202505c.tortuga.gamut.no-agents"
+        ],
+        "b2b-ucs-l9-gamut1":  [
+            "cisco.202505c.tortuga.gamut.no-agents"
+        ],
+        "b2b-ucs-l9-gamut2":  [
+            "cisco.202505c.tortuga.gamut.no-agents"
+        ],
+        "b2b-ucs-l9-gamut3":  [
+            "cisco.202505c.tortuga.gamut.no-agents"
+        ],
         "b2b-tu-2-siren-optics":  [
             "cisco.202305.1.tortuga.siren.no-agents",
             "cisco.202305.1.tortuga.siren.no-agents.v4",
@@ -2819,6 +2985,10 @@
         "b2b-tu-2-siren":"tu2-carib-siren",
         "b2b-tu-2-siren2":"tu2-carib-siren",
         "b2b-tu-2-siren3":"tu2-carib-siren",
+        "b2b-ucs-l9-gamut0":"ucs-l9",
+        "b2b-ucs-l9-gamut1":"ucs-l9",
+        "b2b-ucs-l9-gamut2":"ucs-l9",
+        "b2b-ucs-l9-gamut3":"ucs-l9",
         "b2b-tu-2-siren-optics": "tu2-carib-siren",
         "b2b-tu-2-carib-optics": "tu2-carib-siren",
         "apple-ipfabric-m64": "ucs_m6_49",
@@ -3016,6 +3186,15 @@
             "password" : "roZes@123",
             "ip" : "10.29.158.30",
             "scp_prompt" : "sonic@tu2:/var/www/html/IMAGES",
+            "images_folder" : "/var/www/html/IMAGES",
+            "wget" : "wget"
+        },
+        "ucs-l9": {
+            "host" : "gamut-ucs-l9",
+            "username" : "sonic",
+            "password" : "roZes@123",
+            "ip" : "172.25.168.181",
+            "scp_prompt" : "sonic@gamut-ucs-l9:/var/www/html/IMAGES",
             "images_folder" : "/var/www/html/IMAGES",
             "wget" : "wget"
         },
