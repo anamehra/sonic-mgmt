@@ -1453,7 +1453,10 @@ class TestVxlanMacMoveTriggers():
         st.config('leaf1', 'do show bgp l2vpn evpn route vni 5900', type='vtysh', skip_error_check=True)
         st.config('leaf0', 'do show bgp l2vpn evpn route type 2', type='vtysh', skip_error_check=True)
         st.config('leaf1', 'do show bgp l2vpn evpn route type 2', type='vtysh', skip_error_check=True)
+    
         ###Move the host MAC MOVE 1###
+        vxlan_obj.start_stop_protocols(tg_handle,'stop')
+        st.wait(20)
         #Del traffic item and device group
         vxlan_obj.delete_traffic_item(tg_handle,new_stream_id)
         
@@ -1505,6 +1508,11 @@ class TestVxlanMacMoveTriggers():
         leaf0_check = self.check_mm_no(cli_output_2,host_info_dict['dst_mac'],1)
         if not (leaf1_check and leaf0_check):
             mac_move_1 = False
+
+        ###Move the host MAC MOVE 2###
+        vxlan_obj.start_stop_protocols(tg_handle,'stop')
+        st.wait(20)
+        
         #Del traffic item and device group
         vxlan_obj.delete_traffic_item(tg_handle,new_stream_id_1)
         vxlan_obj.delete_device_groups(tg_handle,list(list(list(dst1_dev_handle.values())[0].values())[0].values())[0])
@@ -1553,6 +1561,10 @@ class TestVxlanMacMoveTriggers():
         leaf1_check = self.check_mm_no(cli_output_2,host_info_dict['dst_mac'],2)
         if not (leaf1_check and leaf0_check):
             mac_move_2 = False
+
+        ###Move the host MAC MOVE test###
+        vxlan_obj.start_stop_protocols(tg_handle,'stop')
+        st.wait(20)
         
         vxlan_obj.delete_traffic_item(tg_handle,new_stream_id_2)
         vxlan_obj.delete_device_groups(tg_handle,list(list(list(dst_dev_handle.values())[0].values())[0].values())[0])
@@ -1729,6 +1741,9 @@ class TestVxlanMacMoveTriggers():
             mac_move = False
             if i % 2 == 1:
                 # Odd = LEAF1
+                ###Move the host MAC MOVE leaf1###
+                vxlan_obj.start_stop_protocols(tg_handle,'stop')
+                st.wait(20)
                 # Reset device groups every iteration
                 vxlan_obj.delete_device_groups(tg_handle,list(list(list(dst_dev_handle.values())[0].values())[0].values())[0])
                 dst1_dev = vxlan_obj.create_device_groups(my_topo_handle['dst1'],host_info_dict['dst1'])
@@ -1753,6 +1768,9 @@ class TestVxlanMacMoveTriggers():
 
             else:
                 # Even = LEAF0
+                ###Move the host MAC MOVE leaf0###
+                vxlan_obj.start_stop_protocols(tg_handle,'stop')
+                st.wait(20)
                 # Reset device groups every iteration
                 vxlan_obj.delete_device_groups(tg_handle,list(list(list(dst1_dev_handle.values())[0].values())[0].values())[0])
                 dst_dev = vxlan_obj.create_device_groups(my_topo_handle['dst'],host_info_dict['dst'])
