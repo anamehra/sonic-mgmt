@@ -584,6 +584,7 @@ def load_docker_ptf_image(stream, docker_ptf_url=None):
         '202505': 'http://172.26.235.76/MISC/docker_ptf_202505_8Oct_azure_tagged_latest.tar',
         '202506': 'http://172.26.235.76/MISC/docker_ptf_202505_8Oct_azure_tagged_latest.tar',
         '202511': 'http://172.26.235.76/MISC/docker_ptf_202511_May4_azure_tagged_latest.tar',
+        '202605': 'http://172.26.235.76/MISC/docker_ptf_master_08Jun_azure_tagged_latest.tar',
         'c-master': 'http://172.26.235.76/MISC/docker_ptf_cmaster_8Oct_azure_tagged_latest_gnmiFix.tar',
         'master': 'http://172.26.235.76/MISC/docker-ptf_master_28Jan2026_tagged_latest.tar'
     }
