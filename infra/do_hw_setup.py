@@ -720,6 +720,13 @@ def add_topo(args):
                                             f"docker exec {docker_ptf_container_name} bash -c 'pip install {SAITHRIFT_WHEEL_FILENAME}'")
         if status_code:
             log.warning(f"Error attempting to pip install {SAITHRIFT_WHEEL_FILENAME}")
+
+        # install the package via pip3 in venv -- fixes the issue for 202605
+        _, _, status_code = _run_cmd_in_ssh(client,
+                                            f"docker exec {docker_ptf_container_name} bash -c './env-python3/bin/pip3 install {SAITHRIFT_WHEEL_FILENAME}'")
+        if status_code:
+            log.warning(f"Error attempting to pip install via venv: {SAITHRIFT_WHEEL_FILENAME}")
+
         # verify through import
         verify_saithrift_package_oneliner = f"""docker exec {docker_ptf_container_name} bash -c 'source env-python3/bin/activate; python3 -c "import switch_sai_thrift; print(switch_sai_thrift)"'"""
         _, _, status_code = _run_cmd_in_ssh(client,
