@@ -30,7 +30,7 @@ devices:
             "0x2b": Cisco
             "0x2d": Cisco
             "0x2c": US
-        access: {protocol: ssh, ip: 172.26.235.249, port: 22}
+        access: {protocol: ssh, ip: 172.26.235.155, port: 22}
         rps: {model: Raritan, ip: 10.28.105.116, outlet: [18,19], username: admin, password: raritan}
         credentials: {username: admin, password: password, altpassword: YourPaSsWoRd}
         properties: {config: default, build: default, services: default, params: def_dut, speed: default}
