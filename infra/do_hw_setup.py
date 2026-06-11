@@ -938,9 +938,6 @@ def sonic_install(args, index):
     log.debug(cmd_list)
     username = DUT_USERNAME
     password = DUT_PASSWORD
-    if checkTortugaImage(stream):
-        username = CISCO_USERNAME
-        password = CISCO_PASSWORD
 
     if 'sonic_pre_install_commands' in testbed_info_dict:
         rc = telnet_run_sonic_pre_post_commands(args, index, True)
@@ -1002,9 +999,6 @@ def telnet_run_sonic_pre_post_commands(args, index, pre_sonic=True):
 
     username = DUT_USERNAME
     password = DUT_PASSWORD
-    if checkTortugaImage(stream):
-        username = CISCO_USERNAME
-        password = CISCO_PASSWORD
     
     [host, port] = testbed_info_dict['telnet_details'][index].split(" ")
     p = telnetConnection(host, port, None, sys.stdout, 'latin-1', False, testbed_info_dict)
@@ -1084,9 +1078,6 @@ def checkForDockersSonic(testbed, stream, index=0):
     # connection gets lost after loading new image, reconnect with retry
     username = DUT_USERNAME
     password = DUT_PASSWORD
-    if checkTortugaImage(stream):
-        username = CISCO_USERNAME
-        password = CISCO_PASSWORD
 
     return nested_ssh(testbed_info_dict["ucs_host_name"], testbed_info_dict["ucs_username"], testbed_info_dict["ucs_password"], testbed_info_dict["dut_ssh"][index], username, password, cmd_list, True, docker_count)
 

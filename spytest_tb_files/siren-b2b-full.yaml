@@ -17,13 +17,13 @@ devices:
         device_type: DevSonic
         access: {protocol: ssh, ip: 10.29.158.73, port: 22}
         rps: {model: Raritan, ip: 172.25.184.145, outlet: 5, username: admin, password: raritan}
-        credentials: {username: cisco, password: cisco123, altpassword: sonic123}
+        credentials: {username: admin, password: password, altpassword: sonic123}
         properties: {config: default, build: default, services: default, params: def_dut, speed: default}
     D2:
         device_type: DevSonic
         access: {protocol: ssh, ip: 10.29.158.74, port: 22}
         rps: {model: Raritan, ip: 172.25.184.145, outlet: 6, username: admin, password: raritan}
-        credentials: {username: cisco, password: cisco123, altpassword: sonic123}
+        credentials: {username: admin, password: password, altpassword: sonic123}
         properties: {config: default, build: default, services: default, params: def_dut, speed: default}
 
     T1:
