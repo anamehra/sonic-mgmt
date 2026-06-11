@@ -153,27 +153,34 @@ def test_bgp_auth_evpn_t2_peer_remove_password_overlay():
     nodes['leaf0'] = vars.D3
     nodes['leaf1'] = vars.D4
 
-    #remove neighbor password of OVERLAY peer group in leaf0
-    cmds = ['router bgp 2363073663',
-           'no neighbor OVERLAY password overlay',
-           'end',
-           'exit']
-    st.vtysh_config(nodes['leaf0'], cmds)
+    # Disrupt+check_before is wrapped in try/finally so the OVERLAY password
+    # restore on leaf0 always runs even if check_neigh_state raises (e.g. CLI
+    # template parsing or timeout). Without this, leaf0 stays without an
+    # OVERLAY password, which leaves leaf0<->spine OVERLAY BGP broken and
+    # cascades into every subsequent test in this module.
+    restore_cmds = ['router bgp 2363073663',
+                    'neighbor OVERLAY password overlay',
+                    'neighbor OVERLAY timers connect 10',
+                    'end',
+                    'exit']
+    try:
+        #remove neighbor password of OVERLAY peer group in leaf0
+        cmds = ['router bgp 2363073663',
+               'no neighbor OVERLAY password overlay',
+               'end',
+               'exit']
+        st.vtysh_config(nodes['leaf0'], cmds)
 
-    st.wait(15, "Wait for 15 secs for BGP neighborship")
+        st.wait(15, "Wait for 15 secs for BGP neighborship")
 
-    #validate OVERLAY neighbors are down and TRANSIT neighbors are still up
-    bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
-    bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
-
-    #add back neighbor password of OVERLAY peer group in leaf0
-    cmds = ['router bgp 2363073663',
-           'neighbor OVERLAY password overlay',
-           'neighbor OVERLAY timers connect 10',
-           'end',
-           'exit']
-
-    st.vtysh_config(nodes['leaf0'], cmds)
+        #validate OVERLAY neighbors are down and TRANSIT neighbors are still up
+        bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
+        bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
+    finally:
+        try:
+            st.vtysh_config(nodes['leaf0'], restore_cmds)
+        except Exception as e:
+            st.log("cleanup: restore OVERLAY password on leaf0 failed: {}".format(e))
 
     # Check PING to peer OVERLAY neighbor to ensure
     # ARP resolution, traffic is restored for seamless TCP connection.
@@ -210,31 +217,35 @@ def test_bgp_auth_evpn_t3_peer_remove_password_transit():
     nodes['leaf0'] = vars.D3
     nodes['leaf1'] = vars.D4
 
-    #remove neighbor password of TRANSIT peer group in leaf0
-    cmds = ['router bgp 2363073663',
-           'no neighbor TRANSIT password transit',
-           'end',
-           'exit']
+    # See note in t2: wrap disrupt+check_before in try/finally so the
+    # TRANSIT password restore on leaf0 always runs.
+    restore_cmds = ['router bgp 2363073663',
+                    'neighbor TRANSIT password transit',
+                    'neighbor TRANSIT bfd',
+                    'neighbor TRANSIT ebgp-multihop 255',
+                    'neighbor TRANSIT timers 3 10',
+                    'neighbor TRANSIT timers connect 10',
+                    'end',
+                    'exit']
+    try:
+        #remove neighbor password of TRANSIT peer group in leaf0
+        cmds = ['router bgp 2363073663',
+               'no neighbor TRANSIT password transit',
+               'end',
+               'exit']
 
-    st.vtysh_config(nodes['leaf0'], cmds)
+        st.vtysh_config(nodes['leaf0'], cmds)
 
-    st.wait(15, "Wait for 15 secs for BGP neighborship")
+        st.wait(15, "Wait for 15 secs for BGP neighborship")
 
-    #validate both OVERLAY neighbors and TRANSIT neighbors are down
-    bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
-    bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
-
-    #add back neighbor password of TRANSIT peer group in leaf0
-    cmds = ['router bgp 2363073663',
-           'neighbor TRANSIT password transit',
-           'neighbor TRANSIT bfd',
-           'neighbor TRANSIT ebgp-multihop 255',
-           'neighbor TRANSIT timers 3 10',
-           'neighbor TRANSIT timers connect 10',
-           'end',
-           'exit']
-
-    st.vtysh_config(nodes['leaf0'], cmds)
+        #validate both OVERLAY neighbors and TRANSIT neighbors are down
+        bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
+        bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
+    finally:
+        try:
+            st.vtysh_config(nodes['leaf0'], restore_cmds)
+        except Exception as e:
+            st.log("cleanup: restore TRANSIT password on leaf0 failed: {}".format(e))
 
     # Check PING to peer OVERLAY neighbor to ensure
     # ARP resolution, traffic is restored for seamless TCP connection.
@@ -268,27 +279,31 @@ def test_bgp_auth_evpn_t4_peer_change_password_overlay():
     nodes['leaf0'] = vars.D3
     nodes['leaf1'] = vars.D4
 
-    #change neighbor password of OVERLAY peer group in leaf0
-    cmds = ['router bgp 2363073663',
-           'neighbor OVERLAY password overlay_wrong',
-           'end',
-           'exit']
+    # See note in t2: wrap disrupt+check_before in try/finally so the
+    # OVERLAY password is always reset from 'overlay_wrong' back to 'overlay'.
+    restore_cmds = ['router bgp 2363073663',
+                    'neighbor OVERLAY password overlay',
+                    'end',
+                    'exit']
+    try:
+        #change neighbor password of OVERLAY peer group in leaf0
+        cmds = ['router bgp 2363073663',
+               'neighbor OVERLAY password overlay_wrong',
+               'end',
+               'exit']
 
-    st.vtysh_config(nodes['leaf0'], cmds)
+        st.vtysh_config(nodes['leaf0'], cmds)
 
-    st.wait(15, "Wait for 15 secs for BGP neighborship")
+        st.wait(15, "Wait for 15 secs for BGP neighborship")
 
-    #validate both TRANSIT and OVERLAY neighbors are down
-    bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
-    bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
-
-    #add back neighbor password of OVERLAY peer group in leaf0
-    cmds = ['router bgp 2363073663',
-           'neighbor OVERLAY password overlay',
-           'end',
-           'exit']
-
-    st.vtysh_config(nodes['leaf0'], cmds)
+        #validate both TRANSIT and OVERLAY neighbors are down
+        bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
+        bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
+    finally:
+        try:
+            st.vtysh_config(nodes['leaf0'], restore_cmds)
+        except Exception as e:
+            st.log("cleanup: reset OVERLAY password on leaf0 failed: {}".format(e))
 
     # Check PING to peer OVERLAY neighbor to ensure
     # ARP resolution, traffic is restored for seamless TCP connection.
@@ -321,27 +336,31 @@ def test_bgp_auth_evpn_t5_peer_change_password_transit():
     nodes['leaf0'] = vars.D3
     nodes['leaf1'] = vars.D4
 
-    #change neighbor password of TRANSIT peer group in leaf0
-    cmds = ['router bgp 2363073663',
-        'neighbor TRANSIT password transit_wrong',
-        'end',
-        'exit']
+    # See note in t2: wrap disrupt+check_before in try/finally so the
+    # TRANSIT password is always reset from 'transit_wrong' back to 'transit'.
+    restore_cmds = ['router bgp 2363073663',
+                    'neighbor TRANSIT password transit',
+                    'end',
+                    'exit']
+    try:
+        #change neighbor password of TRANSIT peer group in leaf0
+        cmds = ['router bgp 2363073663',
+            'neighbor TRANSIT password transit_wrong',
+            'end',
+            'exit']
 
-    st.vtysh_config(nodes['leaf0'], cmds)
+        st.vtysh_config(nodes['leaf0'], cmds)
 
-    st.wait(15, "Wait for 15 secs for BGP neighborship")
+        st.wait(15, "Wait for 15 secs for BGP neighborship")
 
-    #validate both OVERLAY neighbors and UNDERLAY neighbors are down
-    bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
-    bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
-
-    #add back neighbor password of TRANSIT peer group in leaf0
-    cmds = ['router bgp 2363073663',
-        'neighbor TRANSIT password transit',
-        'end',
-        'exit']
-
-    st.vtysh_config(nodes['leaf0'], cmds)
+        #validate both OVERLAY neighbors and UNDERLAY neighbors are down
+        bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
+        bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
+    finally:
+        try:
+            st.vtysh_config(nodes['leaf0'], restore_cmds)
+        except Exception as e:
+            st.log("cleanup: reset TRANSIT password on leaf0 failed: {}".format(e))
 
     # Check PING to peer OVERLAY neighbor to ensure
     # ARP resolution, traffic is restored for seamless TCP connection.
@@ -374,18 +393,25 @@ def test_bgp_auth_evpn_t6_bgp_interface_flap():
     nodes['leaf0'] = vars.D3
     nodes['leaf1'] = vars.D4
 
-    #shutdown D3D1P1 on leaf0
-    cmd = 'sudo config interface shutdown ' + vars.D3D1P1
-    st.config(nodes['leaf0'], cmd)
+    # See note in t2: wrap disrupt+check_before in try/finally so the
+    # interface is always brought back up. Otherwise a check_neigh_state
+    # exception would leave D3D1P1 shut and break TRANSIT for all later tests.
+    try:
+        #shutdown D3D1P1 on leaf0
+        cmd = 'sudo config interface shutdown ' + vars.D3D1P1
+        st.config(nodes['leaf0'], cmd)
 
-    st.wait(15, "Wait for 15 secs for BGP neighborship")
+        st.wait(15, "Wait for 15 secs for BGP neighborship")
 
-    bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
-    bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
-
-    #no shutdown D3D1P1 on leaf0
-    cmd = 'sudo config interface startup ' + vars.D3D1P1
-    st.config(nodes['leaf0'], cmd)
+        bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
+        bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
+    finally:
+        #no shutdown D3D1P1 on leaf0
+        startup_cmd = 'sudo config interface startup ' + vars.D3D1P1
+        try:
+            st.config(nodes['leaf0'], startup_cmd)
+        except Exception as e:
+            st.log("cleanup: '{}' on leaf0 failed: {}".format(startup_cmd, e))
 
     # Check PING to peer OVERLAY neighbor to ensure
     # ARP resolution, traffic is restored for seamless TCP connection.
@@ -418,21 +444,28 @@ def test_bgp_auth_evpn_t7_wrong_mtu():
     nodes['leaf0'] = vars.D3
     nodes['leaf1'] = vars.D4
 
-    #set mtu for leaf0 to 100 (default 9100)
-    cmd = 'sudo config interface mtu ' + vars.D3D1P1 + ' 100'
-    st.config(nodes['leaf0'], cmd)
-
-    st.wait(15, "Wait for 15 secs for BGP neighborship")
-
-    bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
-    bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
-
-    #set mtu for leaf0 back to 9100
-    # IPv6 global address gets removed upon MTU change; configure it agin
-    cmds = [ 'sudo config interface mtu ' + vars.D3D1P1 + ' 9100',
-             'sudo config interface ip add ' + vars.D3D1P1 + ' 10:1:30:1::3/120']
-    for cmd in cmds:
+    # See note in t2: wrap disrupt+check_before in try/finally so the MTU
+    # is always restored to 9100 (and the IPv6 address re-added). Otherwise
+    # a check_neigh_state exception would leave D3D1P1 at MTU 100 and break
+    # TRANSIT/OVERLAY BGP for any later test (including t8).
+    restore_cmds = ['sudo config interface mtu ' + vars.D3D1P1 + ' 9100',
+                    'sudo config interface ip add ' + vars.D3D1P1 + ' 10:1:30:1::3/120']
+    try:
+        #set mtu for leaf0 to 100 (default 9100)
+        cmd = 'sudo config interface mtu ' + vars.D3D1P1 + ' 100'
         st.config(nodes['leaf0'], cmd)
+
+        st.wait(15, "Wait for 15 secs for BGP neighborship")
+
+        bgp_underlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'TRANSIT')
+        bgp_overlay_before = bgp_auth_object.check_neigh_state(nodes['leaf0'], 'OVERLAY')
+    finally:
+        # IPv6 global address gets removed upon MTU change; configure it again.
+        for cleanup_cmd in restore_cmds:
+            try:
+                st.config(nodes['leaf0'], cleanup_cmd)
+            except Exception as e:
+                st.log("cleanup: '{}' on leaf0 failed: {}".format(cleanup_cmd, e))
 
     # Check PING to peer OVERLAY neighbor to ensure
     # ARP resolution, traffic is restored for seamless TCP connection.

@@ -19,13 +19,28 @@ import tortuga_common_utils as common_obj
 BGP_RMAP_COMMUNITY_POLL_TIMEOUT_SEC = 30
 BGP_RMAP_COMMUNITY_POLL_INTERVAL_SEC = 1.0
 
-# FRR neighbor detail includes Message stats (Updates, Route refresh sent/rcvd, etc.)
+# eBGP UPDATE propagation (leaf network statement -> spine RIB) is asynchronous;
+# poll instead of relying on a fixed sleep so we don't flake on slow runs.
+BGP_RMAP_PREFIX_POLL_TIMEOUT_SEC = 30
+BGP_RMAP_PREFIX_POLL_INTERVAL_SEC = 1.0
+
+# Diagnostic vtysh commands. FRR rejects "show bgp ipv4 unicast neighbors <ip>"
+# (it expects a sub-command like advertised-routes/routes/summary). The
+# "show bgp neighbors <ip>" form is the correct one for session/Message stats.
 # leaf0 -> spine at 10.1.3.1; spine0 -> leaf at 10.1.3.3 (see bgp_cfg.yaml)
 BGP_RMAP_DIAG_NEIGHBOR_LEAF_TO_SPINE = (
-    "vtysh -c 'show bgp ipv4 unicast neighbors 10.1.3.1'"
+    "vtysh -c 'show bgp neighbors 10.1.3.1'"
 )
 BGP_RMAP_DIAG_NEIGHBOR_SPINE_TO_LEAF = (
-    "vtysh -c 'show bgp ipv4 unicast neighbors 10.1.3.3'"
+    "vtysh -c 'show bgp neighbors 10.1.3.3'"
+)
+# For prefix-propagation diagnostics, advertised-routes on the sender and
+# received-routes on the peer make the missing-UPDATE case obvious.
+BGP_RMAP_DIAG_ADV_LEAF_TO_SPINE = (
+    "vtysh -c 'show bgp ipv4 unicast neighbors 10.1.3.1 advertised-routes'"
+)
+BGP_RMAP_DIAG_RX_SPINE_FROM_LEAF = (
+    "vtysh -c 'show bgp ipv4 unicast neighbors 10.1.3.3 received-routes'"
 )
 
 
@@ -35,7 +50,11 @@ def _log_bgp_vtysh_diag(dut, title, vtysh_cmd):
 
 
 def _log_bgp_ft_rmap_peer_stats(nodes, title):
-    """Both eBGP directions for test_ft_bgp_rmap (leaf<->spine)."""
+    """Both eBGP directions for test_ft_bgp_rmap (leaf<->spine).
+
+    Logs neighbor session/Message stats and the advertised/received prefix
+    views so a missing-prefix failure makes the sender vs receiver side clear.
+    """
     _log_bgp_vtysh_diag(
         nodes["leaf0"],
         "{} [leaf0 neighbor 10.1.3.1]".format(title),
@@ -46,6 +65,38 @@ def _log_bgp_ft_rmap_peer_stats(nodes, title):
         "{} [spine0 neighbor 10.1.3.3]".format(title),
         BGP_RMAP_DIAG_NEIGHBOR_SPINE_TO_LEAF,
     )
+    _log_bgp_vtysh_diag(
+        nodes["leaf0"],
+        "{} [leaf0 advertised-routes to 10.1.3.1]".format(title),
+        BGP_RMAP_DIAG_ADV_LEAF_TO_SPINE,
+    )
+    _log_bgp_vtysh_diag(
+        nodes["spine0"],
+        "{} [spine0 received-routes from 10.1.3.3]".format(title),
+        BGP_RMAP_DIAG_RX_SPINE_FROM_LEAF,
+    )
+
+
+def _poll_prefix_on_spine(spine_node, prefix, present,
+                          timeout=BGP_RMAP_PREFIX_POLL_TIMEOUT_SEC,
+                          interval=BGP_RMAP_PREFIX_POLL_INTERVAL_SEC):
+    """Poll 'show ip route' on spine until 'prefix' presence matches 'present'.
+
+    Returns True if the desired state is observed within 'timeout'; False
+    otherwise. Polling avoids fixed sleeps which flake on slow runs while
+    capping the total wait so a real propagation regression still fails.
+    """
+    cmd = 'show ip route'
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        cmd_output = st.config(spine_node, cmd)
+        parsed_output = st.parse_show(spine_node, cmd, cmd_output,
+                                      'show_ip_route.tmpl')
+        seen = any(path.get('ip_address') == prefix for path in parsed_output)
+        if seen == present:
+            return True
+        time.sleep(interval)
+    return False
 
 pytest.fixture(scope='module', autouse=True)
 def box_service_module_hooks(request):
@@ -150,15 +201,8 @@ def test_ft_bgp_rmap(setup_teardown_bgp):
     cmds = ['router bgp 3003',
             'network 134.5.6.0/24']
     common_obj.config_frr(nodes['leaf0'], cmds)
-    st.wait(2)
 
-    cmd = 'show ip route'
-    cmd_output = st.config(nodes['spine0'], cmd)
-    parsed_output = st.parse_show(nodes['spine0'], cmd, cmd_output, 'show_ip_route.tmpl')
-    for path in parsed_output:
-        if path['ip_address'] == "134.5.6.0/24":
-            break
-    else:
+    if not _poll_prefix_on_spine(nodes['spine0'], "134.5.6.0/24", present=True):
         _log_bgp_ft_rmap_peer_stats(
             nodes, "test_ft_bgp_rmap: 134.5.6.0/24 missing on spine after network"
         )
@@ -171,18 +215,12 @@ def test_ft_bgp_rmap(setup_teardown_bgp):
             'network 134.5.6.0/24 route-map test-rmap']
     common_obj.config_frr(nodes['leaf0'], cmds)
 
-    st.wait(2)
-
-    cmd = 'show ip route'
-    cmd_output = st.config(nodes['spine0'], cmd)
-    parsed_output = st.parse_show(nodes['spine0'], cmd, cmd_output, 'show_ip_route.tmpl')
-    for path in parsed_output:
-        if path['ip_address'] == "134.5.6.0/24":
-            _log_bgp_ft_rmap_peer_stats(
-                nodes,
-                "test_ft_bgp_rmap: 134.5.6.0/24 still on spine after deny route-map",
-            )
-            st.report_fail("test_case_failed", nodes['spine0'])
+    if not _poll_prefix_on_spine(nodes['spine0'], "134.5.6.0/24", present=False):
+        _log_bgp_ft_rmap_peer_stats(
+            nodes,
+            "test_ft_bgp_rmap: 134.5.6.0/24 still on spine after deny route-map",
+        )
+        st.report_fail("test_case_failed", nodes['spine0'])
 
     cmds = ['no route-map test-rmap deny 10',
             'no access-list test-access-list1 seq 5 deny 134.5.6.0/24']

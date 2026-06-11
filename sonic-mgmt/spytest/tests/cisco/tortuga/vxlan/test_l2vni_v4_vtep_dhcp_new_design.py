@@ -185,18 +185,67 @@ def test_dhcp_l2vni_ipv4_basic_new_design():
         st.log("Skipping: dhcp4relay new design not supported - gracefully passing.")
         return st.report_pass("test_case_passed", "dhcp4relay new design is not there. so gracefully passing")
 
-    config_dhcp_gateway_ipv4(vars.D4)
-    config_dhcp_relay_feature(vars.D3, enable=False)
-    config_dhcp_relay_feature(vars.D4, enable=False)
-    
-    result = dhcp_l2vni_ipv4_setup_and_verification()
+    result = False
+    # Accumulate any cleanup-step failures so a human reading the log gets
+    # a single greppable banner when this test leaves residue (Vlan2
+    # gateway IP on D4 stuck, or dhcp_relay not re-enabled). The test
+    # result itself is NOT changed to fail — see the A1 design note in
+    # the bgp_vrf module teardowns for the rationale.
+    cleanup_issues = []
+    # The Vlan2 gateway IP add on D4 and the dhcp_relay disable on both leafs
+    # are partial mutations: if `config_dhcp_relay_feature(..., enable=False)`
+    # raises after `config_dhcp_gateway_ipv4(vars.D4)` succeeds, the gateway
+    # IP must still be unwound. Keep all three setup mutations inside the
+    # try so the finally always runs against whatever partial state we left.
+    try:
+        config_dhcp_gateway_ipv4(vars.D4)
+        config_dhcp_relay_feature(vars.D3, enable=False)
+        config_dhcp_relay_feature(vars.D4, enable=False)
 
-    config_dhcp_relay_feature(vars.D4)
-    config_dhcp_relay_feature(vars.D3)
-    config_dhcp_gateway_ipv4(vars.D4, add=False)
+        result = dhcp_l2vni_ipv4_setup_and_verification()
+    finally:
+        # Always unwind per-test config so the module-fixture deconfig can
+        # delete Vlan{dhcprelay_vlan2}. Without this, an exception in the
+        # verification path (e.g., verify_vtep_state when leaf0<->leaf1 EVPN
+        # is not yet up) skips the cleanup below, leaving the Vlan2 gateway
+        # IP on D4. The YAML 'sonic' deconfig then fails the entire chain
+        # at 'config vlan del 2' with:
+        #   "Vlan2 can not be removed. First remove IP addresses assigned
+        #    to this VLAN and unbind vrf"
+        # which leaves Loopback27/VXLAN/use-link-local-only residue on D4
+        # and poisons every subsequent module's leaf0<->leaf1 EVPN state.
+        # Each cleanup step is guarded so a single failure doesn't skip
+        # the rest.
+        try:
+            config_dhcp_relay_feature(vars.D4)
+        except Exception as e:
+            msg = "re-enable dhcp_relay on D4 failed: {}".format(e)
+            st.log("cleanup: " + msg)
+            cleanup_issues.append(msg)
+        try:
+            config_dhcp_relay_feature(vars.D3)
+        except Exception as e:
+            msg = "re-enable dhcp_relay on D3 failed: {}".format(e)
+            st.log("cleanup: " + msg)
+            cleanup_issues.append(msg)
+        try:
+            config_dhcp_gateway_ipv4(vars.D4, add=False)
+        except Exception as e:
+            msg = "remove Vlan{} IP on D4 failed: {}".format(dhcprelay_vlan2, e)
+            st.log("cleanup: " + msg)
+            cleanup_issues.append(msg)
+
+    if cleanup_issues:
+        st.error(msg=(
+            "cleanup: test_dhcp_l2vni_ipv4_basic_new_design left "
+            "{} cleanup issue(s); module teardown's Vlan{} delete may "
+            "fail and poison downstream modules' leaf0<->leaf1 EVPN. "
+            "Details:\n  - {}"
+        ).format(len(cleanup_issues), dhcprelay_vlan2,
+                 "\n  - ".join(cleanup_issues)))
 
     if result:
-        st.report_pass('test_case_passed')  
+        st.report_pass('test_case_passed')
     else:
         st.log("one or more traffic test failed")
         st.report_fail('test_case_failed')

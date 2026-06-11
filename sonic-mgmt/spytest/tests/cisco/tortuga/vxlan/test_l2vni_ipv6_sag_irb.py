@@ -232,45 +232,65 @@ def test_l2vni_ipv6_sym_irb_sag_change_ip():
     ## Verify Vtep state
     vxlan_obj.verify_vtep_state_v6(nodes, LEAF0_VXLAN_IP, LEAF1_VXLAN_IP)
 
-    '''
-    remove existed SAG IP
-    '''
-    st.config(nodes['leaf0'], 'sudo config interface ip rem {} {}/24'.format('Vlan' + SAG1_VLAN, SAG1_IP))
-    st.config(nodes['leaf1'], 'sudo config interface ip rem {} {}/24'.format('Vlan' + SAG1_VLAN, SAG1_IP))
-
-    '''
-    change to new SAG IP
-    '''
     old_sag1_ip = data.d3tp3_ip6_addr
     new_sag_ip = "2003:db8:1::10"
-    st.config(nodes['leaf0'], 'sudo config interface ip add {} {}/24'.format('Vlan' + SAG1_VLAN, new_sag_ip))
-    st.config(nodes['leaf1'], 'sudo config interface ip add {} {}/24'.format('Vlan' + SAG1_VLAN, new_sag_ip))
+    result = False
+    # Initialize the tgen handles BEFORE the try so the finally can call
+    # traffic_cleanup unconditionally without NameError when the exception
+    # is raised before / during traffic_setup().
+    streams = None
+    handles = None
+    # The new SAG IP and the in-memory data.d3tp3_ip6_addr / data.d4tp4_ip6_addr
+    # mutation must always be unwound so the next test in this module (and the
+    # module-fixture teardown) sees the original SAG IP on Vlan{SAG1_VLAN}.
+    # Wrap mutate+verify+traffic in try/finally so a verify_vtep_state_v6 /
+    # check_traffic exception cannot leave new_sag_ip on the leafs.
+    try:
+        '''
+        remove existed SAG IP
+        '''
+        st.config(nodes['leaf0'], 'sudo config interface ip rem {} {}/24'.format('Vlan' + SAG1_VLAN, SAG1_IP))
+        st.config(nodes['leaf1'], 'sudo config interface ip rem {} {}/24'.format('Vlan' + SAG1_VLAN, SAG1_IP))
 
-    data.d3tp3_ip6_addr = new_sag_ip
-    data.d4tp4_ip6_addr = new_sag_ip
-    streams, handles = traffic_setup()
+        '''
+        change to new SAG IP
+        '''
+        st.config(nodes['leaf0'], 'sudo config interface ip add {} {}/24'.format('Vlan' + SAG1_VLAN, new_sag_ip))
+        st.config(nodes['leaf1'], 'sudo config interface ip add {} {}/24'.format('Vlan' + SAG1_VLAN, new_sag_ip))
 
-    ## Verify Vtep state
-    vxlan_obj.verify_vtep_state_v6(nodes, LEAF0_VXLAN_IP, LEAF1_VXLAN_IP)
+        data.d3tp3_ip6_addr = new_sag_ip
+        data.d4tp4_ip6_addr = new_sag_ip
+        streams, handles = traffic_setup()
 
-    ## Run Traffic: Bi-directional Ping and Burst of 500 Packets
-    result = vxlan_obj.check_traffic(streams, timeout=10)
-    traffic_cleanup(streams, handles)
+        ## Verify Vtep state
+        vxlan_obj.verify_vtep_state_v6(nodes, LEAF0_VXLAN_IP, LEAF1_VXLAN_IP)
 
-    ## recover SAG ip
-    data.d3tp3_ip6_addr = old_sag1_ip
-    data.d4tp4_ip6_addr = old_sag1_ip
-    '''
-    remove SAG IP
-    '''
-    st.config(nodes['leaf0'], 'sudo config interface ip rem {} {}/24'.format('Vlan' + SAG1_VLAN, new_sag_ip))
-    st.config(nodes['leaf1'], 'sudo config interface ip rem {} {}/24'.format('Vlan' + SAG1_VLAN, new_sag_ip))
-
-    '''
-    recover to old SAG IP
-    '''
-    st.config(nodes['leaf0'], 'sudo config interface ip add {} {}/24'.format('Vlan' + SAG1_VLAN, old_sag1_ip))
-    st.config(nodes['leaf1'], 'sudo config interface ip add {} {}/24'.format('Vlan' + SAG1_VLAN, old_sag1_ip))
+        ## Run Traffic: Bi-directional Ping and Burst of 500 Packets
+        result = vxlan_obj.check_traffic(streams, timeout=10)
+    finally:
+        # If traffic_setup() succeeded, the streams/handles must be torn
+        # down regardless of any failure in verify / check_traffic, or they
+        # leak into later tests.
+        if handles is not None:
+            try:
+                traffic_cleanup(streams, handles)
+            except Exception as e:
+                st.log("cleanup: traffic_cleanup failed: {}".format(e))
+        ## recover SAG ip
+        data.d3tp3_ip6_addr = old_sag1_ip
+        data.d4tp4_ip6_addr = old_sag1_ip
+        # Each cleanup step is guarded so a single failure does not skip the
+        # rest of the unwind.
+        for node_key, cleanup_cmd in [
+            ('leaf0', 'sudo config interface ip rem {} {}/24'.format('Vlan' + SAG1_VLAN, new_sag_ip)),
+            ('leaf1', 'sudo config interface ip rem {} {}/24'.format('Vlan' + SAG1_VLAN, new_sag_ip)),
+            ('leaf0', 'sudo config interface ip add {} {}/24'.format('Vlan' + SAG1_VLAN, old_sag1_ip)),
+            ('leaf1', 'sudo config interface ip add {} {}/24'.format('Vlan' + SAG1_VLAN, old_sag1_ip)),
+        ]:
+            try:
+                st.config(nodes[node_key], cleanup_cmd)
+            except Exception as e:
+                st.log("cleanup: '{}' on {} failed: {}".format(cleanup_cmd, node_key, e))
 
     if result:
         st.report_pass("test_case_passed", "test_l2vni_ipv6_sym_irb_sag_change_ip passed")
@@ -289,41 +309,58 @@ def test_l2vni_ipv6_sym_irb_sag_change_mac():
     st.banner("Start to test sag mac change")
 
     ## Verify Vtep state
-    vxlan_obj.verify_vtep_state_v6(nodes, LEAF0_VXLAN_IP, LEAF1_VXLAN_IP)    
-
-    '''
-    remove SAG MAC
-    '''
-    st.config(nodes['leaf0'], 'sudo config static-anycast-gateway mac_address del')
-    st.config(nodes['leaf1'], 'sudo config static-anycast-gateway mac_address del')
-
-    '''
-    add new SAG MAC
-    '''
-    new_sag_mac = "00:22:44:66:88:99"
-    st.config(nodes['leaf0'], 'sudo config static-anycast-gateway mac_address add {}'.format(new_sag_mac))
-    st.config(nodes['leaf1'], 'sudo config static-anycast-gateway mac_address add {}'.format(new_sag_mac))
-
-    streams, handles = traffic_setup()
-
-    ## Verify Vtep state
     vxlan_obj.verify_vtep_state_v6(nodes, LEAF0_VXLAN_IP, LEAF1_VXLAN_IP)
-    ## Run Traffic: Bi-directional Burst of 100 Packets
-    result = vxlan_obj.check_traffic(streams, timeout=10)
 
-    traffic_cleanup(streams, handles)
+    new_sag_mac = "00:22:44:66:88:99"
+    result = False
+    # Initialize the tgen handles BEFORE the try so the finally can call
+    # traffic_cleanup unconditionally without NameError when the exception
+    # is raised before / during traffic_setup().
+    streams = None
+    handles = None
+    # The SAG MAC on both leafs must always be restored to SAG_MAC. Wrap
+    # mutate+verify+traffic in try/finally so a verify_vtep_state_v6 /
+    # check_traffic exception cannot leave new_sag_mac configured.
+    try:
+        '''
+        remove SAG MAC
+        '''
+        st.config(nodes['leaf0'], 'sudo config static-anycast-gateway mac_address del')
+        st.config(nodes['leaf1'], 'sudo config static-anycast-gateway mac_address del')
 
-    '''
-    remove SAG MAC
-    '''
-    st.config(nodes['leaf0'], 'sudo config static-anycast-gateway mac_address del')
-    st.config(nodes['leaf1'], 'sudo config static-anycast-gateway mac_address del')
+        '''
+        add new SAG MAC
+        '''
+        st.config(nodes['leaf0'], 'sudo config static-anycast-gateway mac_address add {}'.format(new_sag_mac))
+        st.config(nodes['leaf1'], 'sudo config static-anycast-gateway mac_address add {}'.format(new_sag_mac))
 
-    '''
-    recover SAG MAC
-    '''
-    st.config(nodes['leaf0'], 'sudo config static-anycast-gateway mac_address add {}'.format(SAG_MAC))
-    st.config(nodes['leaf1'], 'sudo config static-anycast-gateway mac_address add {}'.format(SAG_MAC))
+        streams, handles = traffic_setup()
+
+        ## Verify Vtep state
+        vxlan_obj.verify_vtep_state_v6(nodes, LEAF0_VXLAN_IP, LEAF1_VXLAN_IP)
+        ## Run Traffic: Bi-directional Burst of 100 Packets
+        result = vxlan_obj.check_traffic(streams, timeout=10)
+    finally:
+        # If traffic_setup() succeeded, the streams/handles must be torn
+        # down regardless of any failure in verify / check_traffic, or they
+        # leak into later tests.
+        if handles is not None:
+            try:
+                traffic_cleanup(streams, handles)
+            except Exception as e:
+                st.log("cleanup: traffic_cleanup failed: {}".format(e))
+        # Each cleanup step is guarded so a single failure does not skip the
+        # rest of the unwind.
+        for node_key, cleanup_cmd in [
+            ('leaf0', 'sudo config static-anycast-gateway mac_address del'),
+            ('leaf1', 'sudo config static-anycast-gateway mac_address del'),
+            ('leaf0', 'sudo config static-anycast-gateway mac_address add {}'.format(SAG_MAC)),
+            ('leaf1', 'sudo config static-anycast-gateway mac_address add {}'.format(SAG_MAC)),
+        ]:
+            try:
+                st.config(nodes[node_key], cleanup_cmd)
+            except Exception as e:
+                st.log("cleanup: '{}' on {} failed: {}".format(cleanup_cmd, node_key, e))
 
     if result:
         st.report_pass("test_case_passed", "test_l2vni_ipv6_sym_irb_sag_change_mac passed")

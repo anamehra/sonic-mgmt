@@ -262,12 +262,19 @@ def configure_and_validate_basic_l3vni(overlay_afamily):
     if overlay_afamily == 'ipv6':
         leaf0_vrf_prefix = '2002:db8:1::'
         leaf1_vrf_prefix = '2003:db8:1::'
+        # show_bgp_l2vpn_evpn_prefix.tmpl is IPv4-only (PREFIXIP regex
+        # only matches [\d\.]+), so calling verify_bgp() on an IPv6
+        # prefix returns an empty parse, retries until timeout and
+        # eventually fails with 'Found no prefixes advertised'. The
+        # IPv6 path must use the dedicated verify_bgp_v6() helper.
+        verify_fn = vxlan_obj.verify_bgp_v6
     else:
         leaf0_vrf_prefix = '100.100.100.0'
         leaf1_vrf_prefix = '100.100.101.0'
+        verify_fn = vxlan_obj.verify_bgp
 
-    vxlan_obj.verify_bgp(nodes, leaf1_vrf_prefix, 'leaf0')
-    vxlan_obj.verify_bgp(nodes, leaf0_vrf_prefix, 'leaf1')
+    verify_fn(nodes, leaf1_vrf_prefix, 'leaf0')
+    verify_fn(nodes, leaf0_vrf_prefix, 'leaf1')
 
 def deconfigure_basic_l3vni(overlay_afamily):
     vars = st.get_testbed_vars()
@@ -667,9 +674,11 @@ def test_l3vni_v6_v6_vtep_remove_add_bgp():
         #Start Verification
         leaf0_vrf_prefix = '2002:db8:1::'
         leaf1_vrf_prefix = '2003:db8:1::'
-        
-        vxlan_obj.verify_bgp(nodes, leaf1_vrf_prefix, 'leaf0')
-        vxlan_obj.verify_bgp(nodes, leaf0_vrf_prefix, 'leaf1')
+
+        # IPv6 prefixes require verify_bgp_v6; the IPv4-only template used
+        # by verify_bgp does not match FRR's IPv6 output.
+        vxlan_obj.verify_bgp_v6(nodes, leaf1_vrf_prefix, 'leaf0')
+        vxlan_obj.verify_bgp_v6(nodes, leaf0_vrf_prefix, 'leaf1')
 
         #Run traffic test
         data.d3t1_ip6_addr = "2002:db8:1::1"
@@ -751,8 +760,10 @@ def test_l3vni_v6_v6_vtep_port_flap():
 
         leaf0_vrf_prefix = '2002:db8:1::'
         leaf1_vrf_prefix = '2003:db8:1::'
-        vxlan_obj.verify_bgp(nodes, leaf1_vrf_prefix, 'leaf0')
-        vxlan_obj.verify_bgp(nodes, leaf0_vrf_prefix, 'leaf1')
+        # IPv6 prefixes require verify_bgp_v6; the IPv4-only template used
+        # by verify_bgp does not match FRR's IPv6 output.
+        vxlan_obj.verify_bgp_v6(nodes, leaf1_vrf_prefix, 'leaf0')
+        vxlan_obj.verify_bgp_v6(nodes, leaf0_vrf_prefix, 'leaf1')
 
         #Run traffic test
         data.d3t1_ip6_addr = "2002:db8:1::1"

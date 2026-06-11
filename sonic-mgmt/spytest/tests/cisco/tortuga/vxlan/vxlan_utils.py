@@ -6,9 +6,19 @@ import re
 import time
 from retry import retry
 
-NO_OF_RETRIES = 6 
+NO_OF_RETRIES = 6
 REMOTE_VTEP_COUNT = '1'
 NO_OF_BGP_RETRIES = 20
+
+# Maximum time we wait for the EVPN underlay to discover the peer VTEP
+# before the data-plane ping in tgen_preconfig. EVPN type-3 (IMET) advert
+# can take significantly longer than underlay BGP coming up; without this
+# gate, the ping times out and cascades into module-config-failed.
+TGEN_PRECONFIG_VTEP_TIMEOUT_SEC = 120
+TGEN_PRECONFIG_VTEP_INTERVAL_SEC = 5
+# Additional settle time after VTEP up to let FDB/host-route programming
+# complete before issuing the ping.
+TGEN_PRECONFIG_POST_VTEP_WAIT_SEC = 30
 
 def config_vlan(node, vlan, members = [], vrf = None, add = True, tagged = False):
     config = ''
@@ -70,6 +80,44 @@ def verify_ping(handles, dest_ip, count='5'):
         st.log("Ping failed")
     return ping_result
 
+
+def _resolve_dut_from_port(port):
+    """Resolve a TGen port name like 'T1D3P1' to its spytest DUT handle.
+
+    Returns the DUT handle (vars.D<N>) or None if it cannot be resolved.
+    """
+    m = re.match(r'T\d+D(\d+)P\d+$', port)
+    if not m:
+        return None
+    vars = st.get_testbed_vars()
+    attr = 'D{}'.format(m.group(1))
+    return getattr(vars, attr, None)
+
+
+def _wait_remote_vtep_oper_up(dut, timeout=TGEN_PRECONFIG_VTEP_TIMEOUT_SEC,
+                              interval=TGEN_PRECONFIG_VTEP_INTERVAL_SEC):
+    """Poll 'show vxlan remotevtep' on dut until at least one remote VTEP is
+    oper_up. Returns True if oper_up is observed within 'timeout' seconds,
+    False otherwise.
+
+    This makes the EVPN-side convergence explicit instead of relying on a
+    fixed sleep; the caller can then either proceed with the ping or fail
+    fast with a meaningful 'no remote VTEP' error rather than a silent ping
+    timeout.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        output = st.show(dut, "show vxlan remotevtep",
+                         skip_tmpl=True, skip_error_check=True)
+        parsed = st.parse_show(dut, "show vxlan remotevtep",
+                               output, "show_vxlan_remote.tmpl")
+        for vtep in parsed or []:
+            if vtep.get('tun_status') == 'oper_up':
+                return True
+        time.sleep(interval)
+    return False
+
+
 def tgen_preconfig(stream_info, traffic_item_type, data, addr_family='ipv4'):
     '''  
     Author:Ramsiddarth Ragurajan (rraguraj@cisco.com)
@@ -106,14 +154,39 @@ def tgen_preconfig(stream_info, traffic_item_type, data, addr_family='ipv4'):
             int_handle_1= res1['handle']
             res2=tg_handle2.tg_interface_config(port_handle=port_handle2, mode='config', intf_ip_addr=stream_info['dst_endpoint']['host_ip'], gateway=stream_info['dst_endpoint']['gateway'], src_mac_addr=stream_info['dst_endpoint']['mac'], arp_send_req='1')
             int_handle_2 = res2['handle']
-        st.wait(60)
+        # Wait for the EVPN underlay to actually discover the peer VTEP
+        # (oper_up) on both leaves before pinging. Replaces the previous
+        # fixed st.wait(60), which was insufficient on some runs - especially
+        # IPv6 underlays - and caused this function to fail with a silent
+        # ping timeout that spytest then surfaced as 'module configuration
+        # failed' across the whole module. If we can't resolve the DUT from
+        # the port name, fall back to the original sleep to avoid changing
+        # behaviour for callers we don't recognise.
+        src_dut = _resolve_dut_from_port(stream_info['src_endpoint']['port'])
+        dst_dut = _resolve_dut_from_port(stream_info['dst_endpoint']['port'])
+        if src_dut and dst_dut:
+            for label, dut in (('src', src_dut), ('dst', dst_dut)):
+                if not _wait_remote_vtep_oper_up(dut):
+                    st.log("tgen_preconfig: no oper_up remote VTEP on {} "
+                           "side ({}) within {}s; aborting before ping"
+                           .format(label, dut, TGEN_PRECONFIG_VTEP_TIMEOUT_SEC))
+                    st.report_fail('test_case_failed', "Ping failed between endpoints")
+            # Brief settle so FDB / host-route programming completes after
+            # the VTEP tunnel reports oper_up.
+            st.wait(TGEN_PRECONFIG_POST_VTEP_WAIT_SEC)
+        else:
+            st.log("tgen_preconfig: could not resolve DUTs from ports "
+                   "(src={}, dst={}); using legacy fixed 60s wait"
+                   .format(stream_info['src_endpoint']['port'],
+                           stream_info['dst_endpoint']['port']))
+            st.wait(60)
         ###PING TEST###
         ping_result = tgen_utils.verify_interface_ping(src_obj=tg_handle1, dev_handle=int_handle_1, dst_ip=stream_info['dst_endpoint']['host_ip'],ping_count='5', exp_count='5')
         if ping_result:
             st.log("Ping succeeded.")
         else:
             st.log("Ping failed")
-            st.report_fail("Ping failed between endpoints")
+            st.report_fail('test_case_failed', "Ping failed between endpoints")
         ### Create Traffic Stream ###
         if traffic_item_type == "bounded":
             ###Bidirectional###
@@ -748,6 +821,17 @@ def configure_nodes(nodes, vrf, leaf0_vlan, leaf0_vlan_ip, leaf1_vlan, leaf1_vla
     st.config(nodes['leaf0'], 'sudo config interface ip add {} {}'.format('Vlan' + leaf0_vlan, leaf0_vlan_ip))
     st.config(nodes['leaf1'], 'sudo config interface ip add {} {}'.format('Vlan' + leaf1_vlan, leaf1_vlan_ip))
 
+# FRR path status line. We require `valid,` and `best` on the same line so
+# `valid` cannot match `invalid` and `best` cannot match `no best path` from
+# a different path entry. `(?<![a-z])` rejects the `valid` inside `invalid`.
+_BGP_V6_VALID_BEST_RE = re.compile(
+    r'(?<![a-z])valid,[^\n]*\bbest\b', re.MULTILINE)
+# Explicit negative markers that disqualify the prefix even if some path
+# entry on the same `show` happens to look healthy.
+_BGP_V6_NEGATIVE_RE = re.compile(
+    r'no best path|(?<![a-z])invalid(?![a-z])')
+
+
 def _check_bgp_v6_once(nodes, prefix, src_vtep, expected_l3vni='1000'):
     """Single-attempt IPv6 BGP check. Returns True if prefix is valid/best."""
     cmd = 'show bgp l2vpn evpn {}'.format(prefix)
@@ -755,16 +839,26 @@ def _check_bgp_v6_once(nodes, prefix, src_vtep, expected_l3vni='1000'):
                      skip_tmpl=True, skip_error_check=True) or ""
     out_l = output.lower()
     prefix_l = prefix.lower()
-    if (prefix_l in out_l
-            and 'valid' in out_l
-            and 'best' in out_l
-            and '[5]' in out_l
-            and 'vni {}'.format(expected_l3vni).lower() in out_l):
+    expected_vni_token = 'vni {}'.format(expected_l3vni).lower()
+    # Build a precise reason if any check fails so the retry log is useful.
+    if prefix_l not in out_l:
+        reason = 'prefix not present in BGP RIB'
+    elif _BGP_V6_NEGATIVE_RE.search(out_l):
+        # `invalid` or `no best path` present somewhere in the output: do not
+        # accept this as a healthy advertisement.
+        reason = 'invalid / no best path marker present'
+    elif not _BGP_V6_VALID_BEST_RE.search(out_l):
+        reason = 'no path entry with both `valid,` and `best`'
+    elif '[5]' not in out_l:
+        reason = 'no Type-5 (RT-5) route'
+    elif expected_vni_token not in out_l:
+        reason = 'expected L3VNI {} not present'.format(expected_l3vni)
+    else:
         st.log("BGP IPv6 prefix {} validated on {} (l3vni={})"
                .format(prefix, src_vtep, expected_l3vni))
         return True
-    st.error(msg='IPv6 prefix {} not (yet) valid/best on {}'.format(
-        prefix, src_vtep))
+    st.error(msg='IPv6 prefix {} not (yet) valid/best on {}: {}'.format(
+        prefix, src_vtep, reason))
     return False
 
 

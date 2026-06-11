@@ -158,18 +158,38 @@ def test_l2vni_vtep_delete_add ():
     vxlan_obj.verify_vtep_state({"LEAF0_VXLAN_IP":LEAF0_VXLAN_IP,"LEAF1_VXLAN_IP":LEAF1_VXLAN_IP})
 
     test_node = 'leaf0'
-    config_static(test_node, 'bgp', add=False)
-    config_static(test_node, 'sonic', add=False)
-    st.wait(10)
-    config_static(test_node, 'sonic', add=True)
-    config_static(test_node, 'bgp', add=True)
-   
-    st.wait(60)
+    result = False
+    # The deconfig/reconfig cycle below uses skip_error_check=False in
+    # config_node, so a single SONiC/FRR error mid-pipeline can raise and
+    # leave leaf0 with the BGP+SONiC config of test_node removed. That
+    # residue cascades into the module-fixture teardown and every test in
+    # the next module. Guarantee the reconfig runs even if the deconfig
+    # raises, and guard each phase individually so a single failure does
+    # not skip the rest of the restoration.
+    try:
+        config_static(test_node, 'bgp', add=False)
+        config_static(test_node, 'sonic', add=False)
+        st.wait(10)
+        config_static(test_node, 'sonic', add=True)
+        config_static(test_node, 'bgp', add=True)
 
-    vxlan_obj.verify_vtep_state({"LEAF0_VXLAN_IP":LEAF0_VXLAN_IP,"LEAF1_VXLAN_IP":LEAF1_VXLAN_IP})
-    result = run_traffic_test(handles)
+        st.wait(60)
+
+        vxlan_obj.verify_vtep_state({"LEAF0_VXLAN_IP":LEAF0_VXLAN_IP,"LEAF1_VXLAN_IP":LEAF1_VXLAN_IP})
+        result = run_traffic_test(handles)
+    finally:
+        # Idempotent restoration: re-apply sonic+bgp on test_node. If the
+        # in-test reconfig already ran, these calls are no-ops or harmless
+        # re-applies; if the in-test path aborted mid-cycle, this is the
+        # only thing that re-establishes the VTEP for the rest of the run.
+        for phase in ['sonic', 'bgp']:
+            try:
+                config_static(test_node, phase, add=True)
+            except Exception as e:
+                st.log("cleanup: re-apply {} on {} failed: {}".format(phase, test_node, e))
+
     if result:
-        st.report_pass('test_case_passed')  
+        st.report_pass('test_case_passed')
     else:
         st.log("one or more traffic test failed")
         st.report_fail('test_case_failed')

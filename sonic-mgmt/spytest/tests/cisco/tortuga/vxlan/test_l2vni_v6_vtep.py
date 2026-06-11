@@ -399,54 +399,86 @@ def test_v6_vtep_multiple_vni():
             vxlan_obj.config_vlan(nodes['leaf1'], value['vlan'],  value['members'], add=False)
 
 def test_v6_vtep_acl():
-    st.banner("Config ACL Table")
-    for acl_table,acl_table_type in data.acl.items():
-        common_obj.create_acl_table(nodes['leaf1'], acl_table, "INGRESS", acl_table_type, "ingress-acl", [vars.D4D1P1,vars.D4D2P1])
+    # ACL Cleanup must always run so the TORTUGA_ACL_INGRESS{_V6} tables and
+    # ingress-acl bindings on leaf1 D4D1P1/D4D2P1 are removed. Without this,
+    # an exception in verify_vtep_state_v6 / run_specific_traffic_test /
+    # verify_ping leaves ACL tables on leaf1, which can drop traffic for any
+    # later module that uses the same ports.
+    result = False
+    # Accumulate any cleanup-step failures so a human reading the log gets
+    # a single greppable banner when this test leaves ACL residue on
+    # leaf1 ports. The test result itself is NOT changed to fail — see
+    # the A1 design note in the bgp_vrf module teardowns for the
+    # rationale.
+    cleanup_issues = []
+    try:
+        st.banner("Config ACL Table")
+        for acl_table,acl_table_type in data.acl.items():
+            common_obj.create_acl_table(nodes['leaf1'], acl_table, "INGRESS", acl_table_type, "ingress-acl", [vars.D4D1P1,vars.D4D2P1])
 
-    st.banner("Config ACL rules")
-    with open(ACL_JSON_FILE_PATH) as file:
-        acl_rules_data_string = file.read()
+        st.banner("Config ACL rules")
+        with open(ACL_JSON_FILE_PATH) as file:
+            acl_rules_data_string = file.read()
 
-    acl_rules_data_string = set_ip_in_json(acl_rules_data_string)
+        acl_rules_data_string = set_ip_in_json(acl_rules_data_string)
 
-    with open(ACL_JSON_DST_FILE_PATH, "w") as file:
-        file.write(acl_rules_data_string)
+        with open(ACL_JSON_DST_FILE_PATH, "w") as file:
+            file.write(acl_rules_data_string)
 
-    st.log("Copy the Json file to Leaf1")
-    utils_obj.copy_files_to_dut(nodes['leaf1'], [ACL_JSON_DST_FILE_PATH], '~')
-    st.config(nodes['leaf1'], "config acl update full {}".format(ACL_JSON_DST_FILE))
-    st.config(nodes['leaf1'], "counterpoll acl enable")
+        st.log("Copy the Json file to Leaf1")
+        utils_obj.copy_files_to_dut(nodes['leaf1'], [ACL_JSON_DST_FILE_PATH], '~')
+        st.config(nodes['leaf1'], "config acl update full {}".format(ACL_JSON_DST_FILE))
+        st.config(nodes['leaf1'], "counterpoll acl enable")
 
-    st.banner("ACL Table")
-    st.config(nodes['leaf1'], "show acl table")
+        st.banner("ACL Table")
+        st.config(nodes['leaf1'], "show acl table")
 
-    st.banner("ACL Rules")
-    st.config(nodes['leaf1'], "show acl rule")
+        st.banner("ACL Rules")
+        st.config(nodes['leaf1'], "show acl rule")
 
-    vxlan_obj.verify_vtep_state_v6(nodes, LEAF0_VTEP_IP, LEAF1_VTEP_IP)
+        vxlan_obj.verify_vtep_state_v6(nodes, LEAF0_VTEP_IP, LEAF1_VTEP_IP)
 
-    st.banner("Verify ACL stats for {} Traffic".format('V6 Unknown unicast'))
-    result = run_specific_traffic_test('unknownunicast', handles)
+        st.banner("Verify ACL stats for {} Traffic".format('V6 Unknown unicast'))
+        result = run_specific_traffic_test('unknownunicast', handles)
 
-    result &= verify_acl_stats(nodes['leaf1'], data.pkts_per_burst)
+        result &= verify_acl_stats(nodes['leaf1'], data.pkts_per_burst)
 
-    st.banner("Verify V6 Host ping over V6 tunnel with V6 ACL configured ")
-    result &= vxlan_obj.verify_ping(handles, data.t1d4_ip6_addr)
+        st.banner("Verify V6 Host ping over V6 tunnel with V6 ACL configured ")
+        result &= vxlan_obj.verify_ping(handles, data.t1d4_ip6_addr)
 
-    st.banner("Verify V4 Host ping over V6 tunnel with V4 ACL configured ")
-    handles_v4 = vxlan_obj.tgen_preconfig({"src_endpoint": {"port" : "T1D3P1", "host_ip": data_v4.t1d3_ip_addr, "gateway": data_v4.t1d4_ip_addr, "mac" : data_v4.t1d3_mac_addr }, 
-                                        "dst_endpoint" : {"port" : "T1D4P1","host_ip": data_v4.t1d4_ip_addr, "gateway": data_v4.t1d3_ip_addr, "mac" : data_v4.t1d4_mac_addr }},
-                                        "raw",data_v4)
+        st.banner("Verify V4 Host ping over V6 tunnel with V4 ACL configured ")
+        handles_v4 = vxlan_obj.tgen_preconfig({"src_endpoint": {"port" : "T1D3P1", "host_ip": data_v4.t1d3_ip_addr, "gateway": data_v4.t1d4_ip_addr, "mac" : data_v4.t1d3_mac_addr },
+                                            "dst_endpoint" : {"port" : "T1D4P1","host_ip": data_v4.t1d4_ip_addr, "gateway": data_v4.t1d3_ip_addr, "mac" : data_v4.t1d4_mac_addr }},
+                                            "raw",data_v4)
 
-    if handles_v4 == False:
-        result = False
-        st.log('PreConfig failure for V4 over V6')
+        if handles_v4 == False:
+            result = False
+            st.log('PreConfig failure for V4 over V6')
+    finally:
+        st.banner("ACL Cleanup")
+        # Each cleanup step is guarded so a single failure does not skip the
+        # rest of the unwind.
+        for acl_table,acl_table_type in data.acl.items():
+            command = "acl-loader delete {}".format(acl_table)
+            try:
+                st.config(nodes['leaf1'], command)
+            except Exception as e:
+                msg = "'{}' on leaf1 failed: {}".format(command, e)
+                st.log("cleanup: " + msg)
+                cleanup_issues.append(msg)
+            try:
+                common_obj.delete_acl_table(nodes['leaf1'], acl_table_name=acl_table)
+            except Exception as e:
+                msg = "delete_acl_table({}) on leaf1 failed: {}".format(acl_table, e)
+                st.log("cleanup: " + msg)
+                cleanup_issues.append(msg)
 
-    st.banner("ACL Cleanup")
-    for acl_table,acl_table_type in data.acl.items():
-        command = "acl-loader delete {}".format(acl_table)
-        st.config(nodes['leaf1'], command)
-        common_obj.delete_acl_table(nodes['leaf1'], acl_table_name=acl_table)
+    if cleanup_issues:
+        st.error(msg=(
+            "cleanup: test_v6_vtep_acl left {} ACL cleanup issue(s); "
+            "ingress ACLs may remain bound to leaf1 D4D1P1/D4D2P1 and "
+            "drop traffic for downstream modules. Details:\n  - {}"
+        ).format(len(cleanup_issues), "\n  - ".join(cleanup_issues)))
 
     if result:
         st.report_pass('test_case_passed')

@@ -282,6 +282,15 @@ def test_l2vni_mac_move_with_intfdown():
     data.tp2d4_mac_addr = move_host_mac_addr
    
     st.banner("Start to test mac move with interface down")
+    # Accumulate cleanup-step failures across BOTH try/finally blocks
+    # (leaf0 D3T1P1 startup and leaf1 D4T1P1 startup) so a human reading
+    # the log gets a single greppable banner when this test leaves a
+    # port shut. If either startup fails, downstream tests that use
+    # D3T1P1/D4T1P1 will see no traffic and the next module that does
+    # tgen_preconfig on these ports will cascade. The test result itself
+    # is NOT changed to fail — see the A1 design note in the bgp_vrf
+    # module teardowns for the rationale.
+    cleanup_issues = []
     streams_basic, handles_basic = traffic_setup_basic()
 
     ## Verify Vtep state
@@ -334,97 +343,124 @@ def test_l2vni_mac_move_with_intfdown():
 
     ######################################
     ## shutdown the interface at left leaf
+    # Wrap the leaf0 D3T1P1 shutdown -> verify -> startup sequence in
+    # try/finally so the startup always runs even if one of the
+    # bridge fdb / ip neighbor / traffic checks calls report_fail
+    # mid-flight. Without this guard a failure between shutdown and
+    # startup leaves D3T1P1 down for the rest of the suite, breaking
+    # every downstream module that uses this port.
     leaf0_vlan_member = vxlan_obj.get_replacement(vars, "D3T1P1")
     st.config(nodes['leaf0'], 'sudo config interface shutdown {}'.format(leaf0_vlan_member))
-    ## Move the host to right
-    st.banner("Move the host to the right leaf")
-    streams_right, handles_right = traffic_setup_right(streams_basic, handles_basic)
-    count = 1
-    st.show('leaf1', 'sudo ping -c {} {} -q'.format(count, move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
- 
-    result = vxlan_obj.check_traffic(streams_right, timeout=5)
-    traffic_cleanup_right(streams_right, handles_right)
-    if not result:
-        traffic_cleanup_basic(streams_basic, handles_basic)
-        st.report_fail("test_case_failed", "test_l2vni_basic_mac_move traffic failed after moving the host to the right leaf")
+    try:
+        ## Move the host to right
+        st.banner("Move the host to the right leaf")
+        streams_right, handles_right = traffic_setup_right(streams_basic, handles_basic)
+        count = 1
+        st.show('leaf1', 'sudo ping -c {} {} -q'.format(count, move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
 
-    # Verify Bridge FDB on both leafs
-    leaf0_output = st.show(nodes['leaf0'], 'sudo bridge fdb show | grep {}'.format(move_host_mac_addr), skip_tmpl=True, skip_error_check=True)
-    leaf1_output = st.show(nodes['leaf1'], 'sudo bridge fdb show | grep {}'.format(move_host_mac_addr), skip_tmpl=True, skip_error_check=True)
+        result = vxlan_obj.check_traffic(streams_right, timeout=5)
+        traffic_cleanup_right(streams_right, handles_right)
+        if not result:
+            traffic_cleanup_basic(streams_basic, handles_basic)
+            st.report_fail("test_case_failed", "test_l2vni_basic_mac_move traffic failed after moving the host to the right leaf")
 
-    leaf1_vlan_member = vxlan_obj.get_replacement(vars, "D4T1P1")
+        # Verify Bridge FDB on both leafs
+        leaf0_output = st.show(nodes['leaf0'], 'sudo bridge fdb show | grep {}'.format(move_host_mac_addr), skip_tmpl=True, skip_error_check=True)
+        leaf1_output = st.show(nodes['leaf1'], 'sudo bridge fdb show | grep {}'.format(move_host_mac_addr), skip_tmpl=True, skip_error_check=True)
 
-    if leaf1_vlan_member not in leaf1_output:
-        traffic_cleanup_basic(streams_basic, handles_basic)
-        report_fail(nodes['leaf1'], msg='MAC is not in bridge of leaf1: {}'.format(leaf1_output))
+        leaf1_vlan_member = vxlan_obj.get_replacement(vars, "D4T1P1")
 
-    if VXLAN_INTERFACE not in leaf0_output:
-        traffic_cleanup_basic(streams_basic, handles_basic)
-        report_fail(nodes['leaf0'], msg='MAC is not in bridge {} of leaf0: {}'.format(VXLAN_INTERFACE, leaf0_output))
+        if leaf1_vlan_member not in leaf1_output:
+            traffic_cleanup_basic(streams_basic, handles_basic)
+            report_fail(nodes['leaf1'], msg='MAC is not in bridge of leaf1: {}'.format(leaf1_output))
 
-    # Verify IP Neighbor on both leafs
-    leaf0_output = st.show(nodes['leaf0'], 'sudo ip neighbor show {}'.format(move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
-    leaf1_output = st.show(nodes['leaf1'], 'sudo ip neighbor show {}'.format(move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
+        if VXLAN_INTERFACE not in leaf0_output:
+            traffic_cleanup_basic(streams_basic, handles_basic)
+            report_fail(nodes['leaf0'], msg='MAC is not in bridge {} of leaf0: {}'.format(VXLAN_INTERFACE, leaf0_output))
 
-    if "extern_learn" in leaf1_output:
-        traffic_cleanup_basic(streams_basic, handles_basic)
-        report_fail(nodes['leaf1'], msg='IP neighbor is incorrect on leaf1: {}'.format(leaf1_output))
-    # Extern ip neighbor is disabled for now, as we dont support ARP Suppression/A-IRB
-    #if "extern_learn" not in leaf0_output:
-    #    traffic_cleanup_basic(streams_basic, handles_basic)
-    #    report_fail(nodes['leaf0'], msg='IP neighbor is incorrect on leaf0: {}'.format(leaf0_output))
+        # Verify IP Neighbor on both leafs
+        leaf0_output = st.show(nodes['leaf0'], 'sudo ip neighbor show {}'.format(move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
+        leaf1_output = st.show(nodes['leaf1'], 'sudo ip neighbor show {}'.format(move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
 
-    ## startup the interface
-    st.config(nodes['leaf0'], 'sudo config interface startup {}'.format(leaf0_vlan_member))
+        if "extern_learn" in leaf1_output:
+            traffic_cleanup_basic(streams_basic, handles_basic)
+            report_fail(nodes['leaf1'], msg='IP neighbor is incorrect on leaf1: {}'.format(leaf1_output))
+        # Extern ip neighbor is disabled for now, as we dont support ARP Suppression/A-IRB
+        #if "extern_learn" not in leaf0_output:
+        #    traffic_cleanup_basic(streams_basic, handles_basic)
+        #    report_fail(nodes['leaf0'], msg='IP neighbor is incorrect on leaf0: {}'.format(leaf0_output))
+    finally:
+        ## startup the interface (always run, even on report_fail above)
+        try:
+            st.config(nodes['leaf0'], 'sudo config interface startup {}'.format(leaf0_vlan_member))
+        except Exception as e:
+            msg = "startup {} on leaf0 failed: {}".format(leaf0_vlan_member, e)
+            st.log("cleanup: " + msg)
+            cleanup_issues.append(msg)
     st.wait(2)
 
     #############################
     ## shutdown the interface at right leaf
+    # Same try/finally guard for the leaf1 D4T1P1 shutdown -> verify ->
+    # startup sequence; without it a mid-flight report_fail would leave
+    # D4T1P1 down for the rest of the suite.
     leaf1_vlan_member = vxlan_obj.get_replacement(vars, "D4T1P1")
     st.config(nodes['leaf1'], 'sudo config interface shutdown {}'.format(leaf1_vlan_member))
- 
-    ## Move the host back to left
-    st.banner("Move the host back to the left leaf")
-    streams_left2, handles_left2 = traffic_setup_left(streams_basic, handles_basic)
-    count = 1
-    st.show('leaf0', 'sudo ping -c {} {} -q'.format(count, move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
- 
-    result = vxlan_obj.check_traffic(streams_left2, timeout=5)
-    traffic_cleanup_left(streams_left2, handles_left2)
-    if not result:
-        traffic_cleanup_basic(streams_basic, handles_basic)
-        st.report_fail("test_case_failed", "test_l2vni_basic_mac_move traffic failed after moving the host back to the left leaf")
+    try:
+        ## Move the host back to left
+        st.banner("Move the host back to the left leaf")
+        streams_left2, handles_left2 = traffic_setup_left(streams_basic, handles_basic)
+        count = 1
+        st.show('leaf0', 'sudo ping -c {} {} -q'.format(count, move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
 
-    # Verify Bridge FDB on both leafs
-    leaf0_output = st.show(nodes['leaf0'], 'sudo bridge fdb show | grep {}'.format(move_host_mac_addr), skip_tmpl=True, skip_error_check=True)
-    leaf1_output = st.show(nodes['leaf1'], 'sudo bridge fdb show | grep {}'.format(move_host_mac_addr), skip_tmpl=True, skip_error_check=True)
+        result = vxlan_obj.check_traffic(streams_left2, timeout=5)
+        traffic_cleanup_left(streams_left2, handles_left2)
+        if not result:
+            traffic_cleanup_basic(streams_basic, handles_basic)
+            st.report_fail("test_case_failed", "test_l2vni_basic_mac_move traffic failed after moving the host back to the left leaf")
 
-    leaf0_vlan_member = vxlan_obj.get_replacement(vars, "D3T1P1")
+        # Verify Bridge FDB on both leafs
+        leaf0_output = st.show(nodes['leaf0'], 'sudo bridge fdb show | grep {}'.format(move_host_mac_addr), skip_tmpl=True, skip_error_check=True)
+        leaf1_output = st.show(nodes['leaf1'], 'sudo bridge fdb show | grep {}'.format(move_host_mac_addr), skip_tmpl=True, skip_error_check=True)
 
-    if leaf0_vlan_member not in leaf0_output:
-        traffic_cleanup_basic(streams_basic, handles_basic)
-        report_fail(nodes['leaf0'], msg='MAC is not in bridge of leaf0: {}'.format(leaf0_output))
+        leaf0_vlan_member = vxlan_obj.get_replacement(vars, "D3T1P1")
 
-    if VXLAN_INTERFACE not in leaf1_output:
-        traffic_cleanup_basic(streams_basic, handles_basic)
-        report_fail(nodes['leaf1'], msg='MAC is not in bridge {} of leaf1: {}'.format(VXLAN_INTERFACE, leaf1_output))
+        if leaf0_vlan_member not in leaf0_output:
+            traffic_cleanup_basic(streams_basic, handles_basic)
+            report_fail(nodes['leaf0'], msg='MAC is not in bridge of leaf0: {}'.format(leaf0_output))
 
-    # Verify IP Neighbor on both leafs
-    leaf0_output = st.show(nodes['leaf0'], 'sudo ip neighbor show {}'.format(move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
-    leaf1_output = st.show(nodes['leaf1'], 'sudo ip neighbor show {}'.format(move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
+        if VXLAN_INTERFACE not in leaf1_output:
+            traffic_cleanup_basic(streams_basic, handles_basic)
+            report_fail(nodes['leaf1'], msg='MAC is not in bridge {} of leaf1: {}'.format(VXLAN_INTERFACE, leaf1_output))
 
-    if "extern_learn" in leaf0_output:
-        traffic_cleanup_basic(streams_basic, handles_basic)
-        report_fail(nodes['leaf0'], msg='IP neighbor is incorrect on leaf0: {}'.format(leaf0_output))
-    # Extern ip neighbor is disabled for now, as we dont support ARP Suppression/A-IRB
-    #if "extern_learn" not in leaf1_output:
-    #    traffic_cleanup_basic(streams_basic, handles_basic)
-    #    report_fail(nodes['leaf1'], msg='IP neighbor is incorrect on leaf1: {}'.format(leaf1_output))
+        # Verify IP Neighbor on both leafs
+        leaf0_output = st.show(nodes['leaf0'], 'sudo ip neighbor show {}'.format(move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
+        leaf1_output = st.show(nodes['leaf1'], 'sudo ip neighbor show {}'.format(move_host_ip_addr), skip_tmpl=True, skip_error_check=True)
 
-    ## startup the interface
-    st.config(nodes['leaf1'], 'sudo config interface startup {}'.format(leaf1_vlan_member))
-    st.wait(2)	
+        if "extern_learn" in leaf0_output:
+            traffic_cleanup_basic(streams_basic, handles_basic)
+            report_fail(nodes['leaf0'], msg='IP neighbor is incorrect on leaf0: {}'.format(leaf0_output))
+        # Extern ip neighbor is disabled for now, as we dont support ARP Suppression/A-IRB
+        #if "extern_learn" not in leaf1_output:
+        #    traffic_cleanup_basic(streams_basic, handles_basic)
+        #    report_fail(nodes['leaf1'], msg='IP neighbor is incorrect on leaf1: {}'.format(leaf1_output))
+    finally:
+        ## startup the interface (always run, even on report_fail above)
+        try:
+            st.config(nodes['leaf1'], 'sudo config interface startup {}'.format(leaf1_vlan_member))
+        except Exception as e:
+            msg = "startup {} on leaf1 failed: {}".format(leaf1_vlan_member, e)
+            st.log("cleanup: " + msg)
+            cleanup_issues.append(msg)
+    st.wait(2)
     traffic_cleanup_basic(streams_basic, handles_basic)
+
+    if cleanup_issues:
+        st.error(msg=(
+            "cleanup: test_l2vni_mac_move_with_intfdown left "
+            "{} interface(s) shut; downstream tests on these ports will "
+            "see no traffic. Details:\n  - {}"
+        ).format(len(cleanup_issues), "\n  - ".join(cleanup_issues)))
 
     st.report_pass("test_case_passed", "test_l2vni_mac_move_with_intfdown passed")
 
