@@ -49,6 +49,11 @@ class ConfigDbView:
         self._path = path
         self._data = data
 
+    def _check_writable(self):
+        """Raise ConfigDbError if the ConfigDb is in read_only mode."""
+        if self._config_db._read_only:
+            raise ConfigDbError("Cannot modify CONFIG_DB in read_only mode")
+
     def __getitem__(self, key):
         if key not in self._data:
             raise KeyError(f"Key '{key}' not found at path {self._path}")
@@ -67,6 +72,7 @@ class ConfigDbView:
         For non-empty dicts, all fields are written to Redis.
         For scalar values, writes directly to Redis.
         """
+        self._check_writable()
         full_path = self._path + [key]
 
         if isinstance(value, dict):
@@ -100,6 +106,7 @@ class ConfigDbView:
 
     def __delitem__(self, key):
         """Delete a key from CONFIG_DB."""
+        self._check_writable()
         full_path = self._path + [key]
 
         if len(full_path) < 2:
@@ -153,12 +160,14 @@ class ConfigDb:
     Write operations are immediately sent to the DUT.
     """
 
-    def __init__(self, dut):
+    def __init__(self, dut, read_only=False):
         """
         Args:
             dut: DUT name/handle for spytest commands
+            read_only: If True, all write operations will raise ConfigDbError
         """
         self._dut = dut
+        self._read_only = read_only
         self._data = self._load()
 
     def _load(self):

@@ -5578,3 +5578,51 @@ def get_qos_test_dict(fname, key, ordered=False):
         return input_dict[key]
     return None
 
+
+# Spytest report_fail and report_pass message IDs map to templates in
+#   spytest/datastore/messages/common.yaml.
+#
+# Using "test_case_failed" (defined here as REPORT_FAIL_NO_MSG) with a message
+# argument silently drops the message! Always use REPORT_FAIL_WITH_MSG or the
+# fail_test() wrapper if you want to pass in a message.
+REPORT_FAIL_NO_MSG = "test_case_failed"        # Template: "Test case Failed."
+REPORT_FAIL_WITH_MSG = "test_case_failed_msg"  # Template: "Test case Failed {}"
+REPORT_PASS_NO_MSG = "test_case_passed"        # Template: "Test case Passed."
+REPORT_PASS_WITH_MSG = "msg"                   # Template: "{}" (just prints msg)
+
+
+def fail_test(message=None):
+    """
+    Fail the current test with an optional descriptive message.
+
+    Args:
+        message: Optional error description to include in the failure report.
+
+    Example:
+        fail_test("Test failed due to unexpected value: counter=123")
+        fail_test()
+    """
+    if message:
+        st.report_fail(REPORT_FAIL_WITH_MSG, message)
+    else:
+        st.report_fail(REPORT_FAIL_NO_MSG)
+
+
+def pass_test(message=None):
+    """
+    Pass the current test with an optional descriptive message.
+
+    Args:
+        message: Optional description to include in the pass report.
+
+    Example:
+        pass_test("Test passed with data: counter=456")
+        pass_test()
+    """
+    if message:
+        st.report_pass(REPORT_PASS_WITH_MSG, message)
+    else:
+        st.report_pass(REPORT_PASS_NO_MSG)
+
+
+

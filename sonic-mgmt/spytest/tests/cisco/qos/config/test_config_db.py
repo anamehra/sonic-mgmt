@@ -14,7 +14,7 @@ if common_dir not in sys.path:
     sys.path.insert(0, common_dir)
 
 from config_db import ConfigDb, ConfigDbError
-from tests.cisco.common.oci_test_helper import fail_test, pass_test
+from qos_test_utils import fail_test, pass_test
 
 
 class TestConfigDb:
@@ -104,3 +104,65 @@ class TestConfigDb:
             fail_test(f"Restore failed: expected TC={original_tc}, got TC={restored_tc}")
 
         pass_test("ConfigDb read/write operations working correctly")
+
+    def test_config_db_read_only_mode(self):
+        """
+        Test that ConfigDb in read_only mode raises on any write operation.
+
+        Steps:
+        1. Load CONFIG_DB in read_only mode
+        2. Verify read operations work normally
+        3. Verify __setitem__ raises ConfigDbError
+        4. Verify __delitem__ raises ConfigDbError
+        """
+        testbed_vars = st.get_testbed_vars()
+        dut = getattr(testbed_vars, 'D1', None)
+        if not dut:
+            fail_test("No DUT available")
+
+        st.banner("TEST: Loading CONFIG_DB in read_only mode")
+        config = ConfigDb(dut, read_only=True)
+
+        # Verify reads still work
+        tables = list(config.keys())
+        st.log(f"Found {len(tables)} tables in CONFIG_DB (read_only)")
+        if len(tables) == 0:
+            fail_test("CONFIG_DB appears empty")
+
+        if "DSCP_TO_TC_MAP" not in config:
+            fail_test("DSCP_TO_TC_MAP not found in CONFIG_DB")
+
+        dscp_maps = config["DSCP_TO_TC_MAP"]
+        map_names = list(dscp_maps.keys())
+        if not map_names:
+            fail_test("No DSCP_TO_TC maps configured")
+
+        test_map_name = map_names[0]
+        dscp_map = config["DSCP_TO_TC_MAP"][test_map_name]
+        st.log(f"Read OK: map={test_map_name}, keys={list(dscp_map.keys())[:5]}")
+
+        # Verify __setitem__ raises ConfigDbError
+        st.banner("TEST: Verifying write raises in read_only mode")
+        try:
+            config["DSCP_TO_TC_MAP"][test_map_name]["10"] = "7"
+            fail_test("Expected ConfigDbError on __setitem__ but no exception raised")
+        except ConfigDbError as e:
+            st.log(f"Correctly raised ConfigDbError on set: {e}")
+
+        # Verify __delitem__ raises ConfigDbError
+        st.banner("TEST: Verifying delete raises in read_only mode")
+        try:
+            del config["DSCP_TO_TC_MAP"][test_map_name]["10"]
+            fail_test("Expected ConfigDbError on __delitem__ but no exception raised")
+        except ConfigDbError as e:
+            st.log(f"Correctly raised ConfigDbError on del: {e}")
+
+        # Verify setting a dict also raises
+        st.banner("TEST: Verifying dict assignment raises in read_only mode")
+        try:
+            config["DSCP_TO_TC_MAP"][test_map_name]["new_key"] = {"field": "val"}
+            fail_test("Expected ConfigDbError on dict __setitem__ but no exception raised")
+        except ConfigDbError as e:
+            st.log(f"Correctly raised ConfigDbError on dict set: {e}")
+
+        pass_test("ConfigDb read_only mode correctly prevents all writes")
