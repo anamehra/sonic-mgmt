@@ -1187,12 +1187,12 @@ def runIndividualTests(image_id, build_id, testbed, dut_log_dir, client, contain
             if ".py" in test_suites:
                 run_flags = f"-c {test_name}"
             else:
-                run_flags = f"-I {test_name} -t {t} -m individual"
+                run_flags = f"-I {test_name}"
             # Format the datetime object as a string
             formatted_time = now.strftime("%Y%m%d%H%M%S")
             test_name_output = test_name.replace("/","_").replace(".py","")
             run_tests_log_file = f"run_test_{test_name_output}_{formatted_time}.log"
-            run_cmd = f"{RUN_TESTS_PREFIX} ./run_tests.sh -n {t1}{dut_flag} -e -rapP -e --alluredir={allure_directory} -S \"{skip_folders}\" -u {extra_params} {run_flags} -s \"{skip_tests}\" -p {dut_log_dir} > {run_tests_log_file} 2>&1 &"
+            run_cmd = f"{RUN_TESTS_PREFIX} ./run_tests.sh -n {t1}{dut_flag} -e -rapP -e --alluredir={allure_directory} -m individual -S \"{skip_folders}\" -u {extra_params} {run_flags} -t {t},any -s \"{skip_tests}\" -p {dut_log_dir} > {run_tests_log_file} 2>&1 &"
     
             log.debug(f"run_cmd for test - {test_suites}: {run_cmd}")
     log.debug(f'To check logs of the tests, go to ucs:{dut_log_dir}')
