@@ -557,6 +557,72 @@ def change_dut_passwd(device):
     ssh.close()
 
 
+MGMT_PREFIX_LEN = 24
+
+
+def get_mgmt_gwaddr(mgmt_ip):
+    octets = mgmt_ip.split('.')
+    octets[-1] = '1'
+    return '.'.join(octets)
+
+
+def build_config_mgmt_ip_json(mgmt_ip, prefix_len=MGMT_PREFIX_LEN):
+    gwaddr = get_mgmt_gwaddr(mgmt_ip)
+    return {
+        "MGMT_INTERFACE": {
+            f"eth0|{mgmt_ip}/{prefix_len}": {
+                "gwaddr": gwaddr
+            }
+        }
+    }
+
+
+def apply_config_mgmt_ip(device):
+    host = device['HostAgent']
+    port = device['xr_redir22']
+    user = device['uname']
+    passwd = device['passwd']
+    mgmt_ip = device['xr_mgmt_ip']
+    config_json = build_config_mgmt_ip_json(mgmt_ip)
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    connect_with_retries(
+        ssh, host, port, user, passwd, timeout=120, banner_timeout=120,
+        look_for_keys=False, allow_agent=False
+    )
+
+    with ssh.open_sftp() as ftp_client:
+        with ftp_client.file('/tmp/config_mgmt_ip.json', 'w') as remote_file:
+            remote_file.write(json.dumps(config_json, indent=4))
+
+    stdin, stdout, stderr = ssh.exec_command(
+        'sudo sonic-cfggen -j /tmp/config_mgmt_ip.json -w && sudo config save -y'
+    )
+    exit_status = stdout.channel.recv_exit_status()
+    out = stdout.read().decode("utf-8", errors="replace").strip()
+    error = stderr.read().decode("utf-8", errors="replace").strip()
+    ssh.close()
+
+    logging.info(f"Applied config_mgmt_ip on {mgmt_ip}: {out}")
+    if error:
+        logging.info(f"config_mgmt_ip stderr on {mgmt_ip}: {error}")
+    if exit_status != 0:
+        raise Exception(
+            f"Failed to apply config_mgmt_ip on {mgmt_ip}: exit_status={exit_status}, stderr={error}"
+        )
+
+
+def configure_dut_mgmt_ip(data, device_type):
+    if device_type != 'sfd':
+        return
+
+    for dut_name in get_dut_names(data):
+        logging.info(f"********** Configure static mgmt IP for DUT {dut_name} ***********")
+        apply_config_mgmt_ip(data[dut_name])
+        logging.info(f"********** Configure static mgmt IP for DUT {dut_name} is finished ***********")
+
+
 def run_python_script(host,port,user,passwd,cmd_list):
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -1162,6 +1228,12 @@ def configure_vxr(data, topo_type, base_topo_file, vEOS_count, dut_platform, dev
         logging.info("********** Add simulation patches to handle eth4 **********")
         add_sim_patches(data)
         logging.info("********** Add simulation patches to handle eth4 is finished **********")
+
+    # Pin static mgmt IP in config DB before deploy-mg restarts interfaces-config/dhclient
+    if device_type == 'sfd':
+        logging.info("********** Configure static mgmt IP on DUT(s) before deploy-mg ***********")
+        configure_dut_mgmt_ip(data, device_type)
+        logging.info("********** Configure static mgmt IP on DUT(s) before deploy-mg is finished ***********")
 
     # Start docker container, deploy DUT minigraph
     logging.info("********** Deploying DUT minigraph ***********")
