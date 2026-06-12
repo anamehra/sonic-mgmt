@@ -78,7 +78,7 @@ def tg_stc_load(version, logger, logs_path=None):
     #os.environ["STC_TCL"] = tclsh
     os.environ["STC_TCL"] = '/data/projects/scid/tcl/bin/tclsh8.5' 
     #os.environ['TCLLIBPATH'] = "{} {} {} /usr/lib".format(stc_hl_src, tcl_custom_pkgdir, tcl_lib_path)
-    os.environ['TCLLIBPATH'] = "/data/stc-5.45/Spirent_TestCenter_5.45/Spirent_TestCenter_Application_Linux" 
+    os.environ['TCLLIBPATH'] = "/data/projects/scid/tgen/stc/5.45/Spirent_TestCenter_5.45/Spirent_TestCenter_Application_Linux/HltAPI/SourceCode /data/projects/scid/tgen/stc/5.45/Spirent_TestCenter_5.45/Spirent_TestCenter_Application_Linux"
     #os.environ['HLPYAPI_LOG'] = logs_path or os.getenv("SPYTEST_USER_ROOT")
     os.environ['HLPYAPI_LOG'] = '/data/logs' 
 

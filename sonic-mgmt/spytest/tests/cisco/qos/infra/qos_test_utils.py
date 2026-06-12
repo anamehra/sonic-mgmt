@@ -4043,6 +4043,8 @@ def _cleanup_l3_interfaces(dut):
     """Remove IPs and VRF bindings from physical L3 interfaces (INTERFACE table)."""
     skip_interfaces = ['eth0', 'lo', 'docker0', 'Loopback', 'Management']
     result = st.show(dut, "redis-cli -n 4 keys 'INTERFACE|*'", skip_tmpl=True)
+    # Collect bare interface entries (no IP suffix) so we can delete them after
+    bare_entries = []
     for line in result.splitlines():
         parts = _parse_redis_key(line, 'INTERFACE|')
         if parts is None:
@@ -4056,7 +4058,13 @@ def _cleanup_l3_interfaces(dut):
         else:
             st.config(dut, "sudo config interface vrf unbind {}".format(intf),
                      skip_tmpl=True, skip_error_check=True)
+            bare_entries.append(intf)
 
+    # Remove bare INTERFACE|<intf> entries to revert ports to switchport mode.
+    # Without this, the port stays in routed mode and cannot be added to a VLAN.
+    for intf in bare_entries:
+        st.config(dut, "redis-cli -n 4 del 'INTERFACE|{}'".format(intf),
+                 skip_tmpl=True, skip_error_check=True)
 
 def _cleanup_vlan_interfaces(dut):
     """Remove IPs and VRF bindings from VLAN SVIs (VLAN_INTERFACE table)."""
@@ -4189,6 +4197,8 @@ def _cleanup_vrfs(dut):
     Must run after interfaces are unbound and VxLAN mappings are removed.
     BGP VRF instances are removed first since SONiC refuses to delete a VRF
     that is still referenced by 'router bgp <ASN> vrf <name>'.
+
+    Also queries FRR directly to catch BGP VRFs configured via vtysh.
     """
     result = st.show(dut, "redis-cli -n 4 keys 'VRF|*'", skip_tmpl=True)
     vrfs_to_delete = []
@@ -4203,6 +4213,17 @@ def _cleanup_vrfs(dut):
 
     if not vrfs_to_delete:
         return
+
+    # Remove BGP VRF instances from FRR directly (catches vtysh-configured BGP
+    # that has no CONFIG_DB entry in BGP_GLOBALS)
+    frr_output = st.show(dut, "vtysh -c 'show running-config' | grep 'router bgp.*vrf'",
+                         skip_tmpl=True)
+    for line in frr_output.splitlines():
+        m = re.match(r'\s*(router bgp \d+ vrf \S+)', line.strip())
+        if m:
+            bgp_vrf_cmd = m.group(1)
+            st.config(dut, "vtysh -c 'configure terminal' -c 'no {}'".format(bgp_vrf_cmd),
+                     skip_tmpl=True, skip_error_check=True)
 
     # Remove BGP VRF instances first (look up ASN from CONFIG_DB)
     for vrf_name in vrfs_to_delete:
@@ -5493,26 +5514,41 @@ def validate_value(actual, expected, tolerance_percent):
     if expected == 0:
         return actual <= tolerance_percent
     delta = abs(actual - expected) * 100.0 / expected
+    if delta >= 10:
+        st.warn(f"validate_value deviation={delta:.1f}% (actual={actual}, expected={expected}, "
+                f"tolerance={tolerance_percent}%)")
     return delta <= tolerance_percent
 
 def show_cmd_to_dict(dut, cmd, add_j=True):
     """
     Helper to run a show command and parse its JSON output.
-    Returns parsed dictionary or None if output is malformed.
+    Returns parsed dictionary or None if output is malformed or command fails.
     """
-    if add_j:
-        out_str = st.show(dut, 'show ' + cmd + ' -j', skip_tmpl=True)
-    else:
-        out_str = st.show(dut, 'show ' + cmd, skip_tmpl=True)
+    try:
+        if add_j:
+            out_str = st.show(dut, 'show ' + cmd + ' -j', skip_tmpl=True,
+                              skip_error_check=True)
+        else:
+            out_str = st.show(dut, 'show ' + cmd, skip_tmpl=True,
+                              skip_error_check=True)
+    except Exception:
+        return None
+
+    if not out_str:
+        return None
     idx = out_str.rfind('}')
     if idx == -1:
-        st.error("show cmd {} returned malformed string {}".format(cmd, out_str))
+        st.log(f"show cmd {cmd} returned non-JSON output")
         return None
 
     # This is to handle cli inconsistency. 'config scheduler' expects 
     # meter-type but 'show schedule -j' returns meter_type
     out_str = out_str[:idx + 1].replace('meter_type', 'meter-type')
-    return json.loads(out_str)
+    try:
+        return json.loads(out_str)
+    except (json.JSONDecodeError, ValueError):
+        st.log(f"show cmd {cmd} returned invalid JSON")
+        return None
 
 def get_if_mac(dut, if_name):
     mac_str = st.config(dut,\
@@ -5578,7 +5614,6 @@ def get_qos_test_dict(fname, key, ordered=False):
         return input_dict[key]
     return None
 
-
 # Spytest report_fail and report_pass message IDs map to templates in
 #   spytest/datastore/messages/common.yaml.
 #
@@ -5624,5 +5659,61 @@ def pass_test(message=None):
     else:
         st.report_pass(REPORT_PASS_NO_MSG)
 
+def get_queue_counters_json(dut, interface):
+    """Get queue counters for an interface using 'show queue counters --json'.
 
+    Returns raw dict: {'UC0': {'totalbytes': '360,216,...', ...}, 'UC1': {...}, ...}
+    Returns empty dict on failure.
+    """
+    output = st.show(dut, f"show queue counters --json {interface}", skip_tmpl=True)
+    try:
+        idx_start = output.find('{')
+        idx_end = output.rfind('}')
+        if idx_start >= 0 and idx_end > idx_start:
+            data = json.loads(output[idx_start:idx_end + 1])
+            return data.get(interface, {})
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        st.log(f"Queue counters JSON parse failed: {e}")
+    return {}
 
+def get_tc_queue_counters_json(dut, interface, tc):
+    """Get UC queue counters for a specific TC (single CLI call).
+
+    Returns dict: {'totalpacket': int, 'droppacket': int, 'totalbytes': int, 'dropbytes': int}
+    """
+    counters = get_queue_counters_json(dut, interface)
+    key = f"UC{tc}"
+    if key not in counters:
+        return {'totalpacket': 0, 'droppacket': 0, 'totalbytes': 0, 'dropbytes': 0}
+    raw = counters[key]
+    return {
+        'totalpacket': int(raw.get('totalpacket', '0').replace(',', '')),
+        'droppacket': int(raw.get('droppacket', '0').replace(',', '')),
+        'totalbytes': int(raw.get('totalbytes', '0').replace(',', '')),
+        'dropbytes': int(raw.get('dropbytes', '0').replace(',', '')),
+    }
+
+def get_all_tc_queue_counters_json(dut, interface, tcs=None):
+    """Get UC queue counters for multiple TCs in one CLI call.
+
+    Args:
+        dut: DUT handle
+        interface: interface name (e.g. 'Ethernet80')
+        tcs: list of TC indices (e.g. [0,1,2,3,4,7]). None = UC0-UC7.
+
+    Returns: {tc: {'totalpacket': int, 'droppacket': int, 'totalbytes': int, 'dropbytes': int}, ...}
+    """
+    if tcs is None:
+        tcs = list(range(8))
+    counters = get_queue_counters_json(dut, interface)
+    result = {}
+    for tc in tcs:
+        key = f"UC{tc}"
+        raw = counters.get(key, {})
+        result[tc] = {
+            'totalpacket': int(raw.get('totalpacket', '0').replace(',', '')),
+            'droppacket': int(raw.get('droppacket', '0').replace(',', '')),
+            'totalbytes': int(raw.get('totalbytes', '0').replace(',', '')),
+            'dropbytes': int(raw.get('dropbytes', '0').replace(',', '')),
+        }
+    return result

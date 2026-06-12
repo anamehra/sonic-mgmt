@@ -367,7 +367,7 @@ def wait_for_containers(dut, max_wait=180, interval=10):
 
 # ── Log transfer ─────────────────────────────────────────────────────────
 
-def transfer_and_cleanup_logs(tb, local_log_dir, branch, build_id, log_server, tb_config):
+def transfer_logs(tb, local_log_dir, branch, build_id, log_server, tb_config):
     """SCP run logs to central server.
 
     If the build directory already contains logs from a previous run,
@@ -659,19 +659,22 @@ def run_one_testbed(yaml_file, cfg, tb_config):
     test_proc = subprocess.run(cmd, cwd=spytest_dir, stdin=subprocess.DEVNULL)
     test_rc = test_proc.returncode
 
-    # ── Phase 3: Transfer logs ──
+    # ── Phase 3: Transfer logs (only when --publish is specified) ──
     log.info("═══ Phase 3: Transferring logs ═══")
     # run_test.sh names the log dir using profile_suffix (lowercase)
     run_log_dirs = sorted(glob.glob(str(spytest_dir / f"run_logs_{profile_suffix.lower()}_*")), reverse=True)
     latest_log_dir = None
     remote_logs_path = None
+    do_publish = cfg.get("publish")
     if run_log_dirs:
         latest_log_dir = run_log_dirs[0]
         # Write version info so standalone spytest_publish.py can find it
         _write_version_info(latest_log_dir, tb_branch, tb_build_id)
-        if LOG_SERVER:
-            remote_logs_path = transfer_and_cleanup_logs(
+        if do_publish and LOG_SERVER:
+            remote_logs_path = transfer_logs(
                 tb, latest_log_dir, tb_branch, tb_build_id, LOG_SERVER, tb_config)
+        elif not do_publish:
+            log.info("  Skipping log transfer (--publish not specified); logs remain at %s", latest_log_dir)
         else:
             log.warning("No log_server configured; logs remain at %s", latest_log_dir)
     else:
@@ -679,7 +682,7 @@ def run_one_testbed(yaml_file, cfg, tb_config):
                     tb, profile_suffix.lower(), spytest_dir)
 
     # ── Phase 4: Publish to dashboard (before local cleanup) ──
-    if cfg.get("publish") and latest_log_dir and os.path.isdir(latest_log_dir):
+    if do_publish and latest_log_dir and os.path.isdir(latest_log_dir):
         log.info("═══ Phase 4: Publishing to dashboard ═══")
 
         publish_cmd = [
@@ -715,8 +718,22 @@ def run_one_testbed(yaml_file, cfg, tb_config):
     else:
         log.info("═══ Phase 4: Publish SKIPPED (--publish not specified or no logs) ═══")
 
-    # ── Cleanup local logs (after publish) ──
+    # ── Copy *logs.log to spytest dir for easy access ──
+    saved_log = None
     if latest_log_dir and os.path.isdir(latest_log_dir):
+        logs_log_files = glob.glob(os.path.join(latest_log_dir, "*logs.log"))
+        if logs_log_files:
+            src = logs_log_files[0]
+            dst = os.path.join(str(spytest_dir), os.path.basename(src))
+            try:
+                shutil.copy2(src, dst)
+                os.chmod(dst, 0o755)
+                saved_log = dst
+            except Exception as e:
+                log.warning("Could not copy logs.log: %s", e)
+
+    # ── Remove local run_logs directory (only after successful publish) ──
+    if do_publish and latest_log_dir and os.path.isdir(latest_log_dir):
         cleanup_local_logs(latest_log_dir)
 
     duration = int((time.time() - start) / 60)
@@ -724,6 +741,8 @@ def run_one_testbed(yaml_file, cfg, tb_config):
         log.info("✓ Testbed %s COMPLETE (%dm)", tb, duration)
     else:
         log.error("✗ Testbed %s FAILED (exit=%d, %dm)", tb, test_rc, duration)
+    if saved_log:
+        log.info("Consolidated log: %s", saved_log)
 
     return test_rc == 0, duration
 

@@ -3,8 +3,12 @@ import pytest
 import pprint
 from spytest import st, tgapi, SpyTestDict
 import qos_test_utils as common_util
-from spytest.tgen.tg import get_ixiangpf as ixia_handle
 import qos_test_utils
+
+try:
+    from spytest.tgen.tg import get_ixiangpf as ixia_handle
+except ImportError:
+    ixia_handle = None
 
 ONE_GBPS = 1000000000
 
@@ -159,6 +163,17 @@ pg_map_cache = []
 tgen_handle = None
 lossless = []
 
+# Number of tgen ports detected per leaf during init_qos_on_dut
+_tgen_port_count = {}
+
+
+def get_tgen_port_count(leaf=None):
+    """Return the number of tgen ports detected for a leaf (e.g. 'D2').
+    If leaf is None, return the max across all leaves."""
+    if leaf:
+        return _tgen_port_count.get(leaf, 0)
+    return max(_tgen_port_count.values()) if _tgen_port_count else 0
+
 # Track ports where PFC/FCoE L1 config has already been applied.
 # Re-applying causes a link bounce which leads to ARP failures.
 _pfc_configured_ports = set()
@@ -207,14 +222,15 @@ def init_qos_on_dut(dut, tc_list=[3, 4]):
     global lossless
     global pg_map_cache
 
-    # Ensure IXIA-facing ports on leaf DUTs (D3/D4) are up
+    # Ensure IXIA-facing ports on leaf DUTs are up
     vars = st.get_testbed_vars()
-    if vars.D3 == dut:
-        leaf = 'D3'
-    elif vars.D4 == dut:
-        leaf = 'D4'
-    else:
-        leaf = None
+    leaf = None
+    for d in ['D1', 'D2', 'D3', 'D4']:
+        if hasattr(vars, d) and getattr(vars, d) == dut:
+            # Only treat as leaf if it has tgen ports
+            if hasattr(vars, '{}T1P1'.format(d)):
+                leaf = d
+            break
     if leaf:
         ports = ''
         port_cnt = 0
@@ -228,6 +244,7 @@ def init_qos_on_dut(dut, tc_list=[3, 4]):
             ports += f'{port}|'
             port_cnt += 1
 
+        _tgen_port_count[leaf] = port_cnt
         st.log(f'IXIA port cnt {port_cnt}')
         up_cnt = 0
         # Try upto 60 seconds to ensure ports are up
@@ -256,16 +273,26 @@ def init_qos_on_dut(dut, tc_list=[3, 4]):
         pg_map_cache = build_tc_to_pg_map(tc_list)
     qos_test_utils.perform_qos_reload(dut)
     if tgen_handle is None:
-        tgen_handle,_ = tgapi.get_handle_byname('T1D3P1')
+        # Use first available tgen port (works for any topology size)
+        for _d in ['D1', 'D2', 'D3', 'D4']:
+            _key = 'T1{}P1'.format(_d)
+            try:
+                tgen_handle, _ = tgapi.get_handle_byname(_key)
+                if tgen_handle is not None:
+                    break
+            except Exception:
+                continue
     if leaf is None:
         return
 
-    for i in range(1, 5):
-        key = f'T1{leaf}P{i}'
-        if not hasattr(vars, key):
-            break
-        _,port_handle = tgapi.get_handle_byname(key)
-        _configure_pfc_raw(port_handle)
+    if tc_list:
+        for i in range(1, 5):
+            key = f'T1{leaf}P{i}'
+            if not hasattr(vars, key):
+                break
+            _,port_handle = tgapi.get_handle_byname(key)
+            if tgen_handle.tg_type == 'ixia':
+                _configure_pfc_raw(port_handle)
 
 def _wait_for_vport_link_up(ixnet, vport, port_handle, timeout=30):
     """Poll vport state until the link is up or timeout expires."""
@@ -280,7 +307,7 @@ def _wait_for_vport_link_up(ixnet, vport, port_handle, timeout=30):
     return False
 
 def _configure_pfc_raw(port_handle):
-    """Enable PFC/FCoE on a port using the raw ixnet API."""
+    """Enable PFC/FCoE on a port using the raw ixnet API (IXIA only)."""
     st.log(f"Configuring PFC via raw ixnet on port {port_handle} "
            f"with pg_map={pg_map_cache}")
     ixiangpf = ixia_handle()
@@ -720,7 +747,8 @@ def set_pfc_priority_group(tg_handle, traffic_result, tc):
         field_valueType='singleValue',
         field_singleValue=pg_value)
 
-def create_traffic_stream(tb_dict, tgen_src_port, tgen_dst_port, frame_size, pps, tc):
+def create_traffic_stream(tb_dict, tgen_src_port, tgen_dst_port, frame_size, pps, tc,
+                          transmit_mode='continuous', pkts_per_burst=None):
 
     st.log('create_traffic_stream: src {} dst {}'.format(tgen_src_port, tgen_dst_port))
     # stream creation assumes a 4 device setup with 1 spine node, 3 leaf nodes 
@@ -779,19 +807,25 @@ def create_traffic_stream(tb_dict, tgen_src_port, tgen_dst_port, frame_size, pps
     traffic_config = {
         'mode': 'create',
         # Traffic parameters
-        'transmit_mode': 'continuous',
+        'transmit_mode': transmit_mode,
         'frame_size': frame_size,
         
         # Layer 3 configuration
         'l3_protocol': 'ipv4',
         
-        # Enable flow tracking for statistics
-        'track_by': 'traffic_item',
-        'enable_pgid': 1,
-        'rate_pps': pps
+        'rate_pps': pps,
+        'high_speed_result_analysis': 1
     }
 
-    traffic_config['ip_dscp'] = common_util.convert_tc_to_dscp(dst_dut, tc)
+    if pkts_per_burst is not None:
+        traffic_config['pkts_per_burst'] = int(pkts_per_burst)
+
+    # IXIA-specific: enable flow tracking for per-stream stats
+    if tgen_handle.tg_type == 'ixia':
+        traffic_config['track_by'] = 'traffic_item'
+        traffic_config['enable_pgid'] = 1
+
+    traffic_config['ip_dscp'] = qos_test_utils.convert_tc_to_dscp(dst_dut, tc)
     st.log(f"tc {tc} dscp {traffic_config['ip_dscp']}")
     # Configure traffic stream
     traffic_config['emulation_src_handle'] = src_handle
@@ -806,11 +840,15 @@ def create_traffic_stream(tb_dict, tgen_src_port, tgen_dst_port, frame_size, pps
         st.error('traffic cfg failed {}'.format(result))
         return None
 
-    set_pfc_priority_group(tgen_handle, result, tc)
+    # PFC priority group field is IXIA-specific (uses traffic_item handle)
+    if tgen_handle.tg_type == 'ixia':
+        set_pfc_priority_group(tgen_handle, result, tc)
 
     output_dict = {
         'src_handle' : src_handle,
         'dst_handle' : dst_handle,
+        'src_port_handle' : src_port_h,
+        'dst_port_handle' : dst_port_h,
         'src_ip' : src_interface_config['intf_ip_addr'],
         'dst_ip' : dst_interface_config['intf_ip_addr'],
         'stream_id' : result['stream_id'],
@@ -818,8 +856,9 @@ def create_traffic_stream(tb_dict, tgen_src_port, tgen_dst_port, frame_size, pps
     return output_dict
 
 def start_traffic_stream(stream_info=None):
-    tgen_handle.tg_traffic_control(action='apply')
-    tgen_handle.tg_topology_test_control(action='start_all_protocols')
+    if tgen_handle.tg_type == 'ixia':
+        tgen_handle.tg_traffic_control(action='apply')
+        tgen_handle.tg_topology_test_control(action='start_all_protocols')
     if stream_info == None:
         # Start all streams
         tgen_handle.tg_traffic_control(action='run')
@@ -839,9 +878,10 @@ def stop_traffic_stream(stream_info=None):
 
 def collect_traffic_stream_stats():
     # Wait upto 30 seconds to collect statistics
+    stats_mode = 'traffic_item' if tgen_handle.tg_type == 'ixia' else 'streams'
     for i in range(6):
         try:
-            stats = tgen_handle.tg_traffic_stats(mode='traffic_item')
+            stats = tgen_handle.tg_traffic_stats(mode=stats_mode)
         except Exception as e:
             st.wait(5)
             continue
@@ -849,7 +889,52 @@ def collect_traffic_stream_stats():
             break
         st.wait(5)
 
+    # Normalize Spirent stats into IXIA-compatible 'traffic_item' format.
+    # Port-level entries have the most complete per-stream data.
+    if tgen_handle.tg_type == 'stc' and 'traffic_item' not in stats:
+        traffic_item = {}
+        for key, val in stats.items():
+            if not isinstance(val, dict):
+                continue
+            if 'stream' in val:
+                for stream_id, stream_stats in val['stream'].items():
+                    traffic_item[stream_id] = stream_stats
+        # Spirent doesn't always provide loss_percent — compute it
+        for stream_id, stream_stats in traffic_item.items():
+            rx = stream_stats.get('rx', {})
+            if 'loss_percent' not in rx:
+                tx_pkts = int(stream_stats.get('tx', {}).get('total_pkts', 0))
+                rx_pkts = int(rx.get('total_pkts', 0))
+                if tx_pkts > 0:
+                    rx['loss_percent'] = str(
+                        100.0 * (tx_pkts - rx_pkts) / tx_pkts)
+                else:
+                    rx['loss_percent'] = '0.0'
+        stats['traffic_item'] = traffic_item
+
     return stats
+
+
+def log_stream_stats(stats, stream_id):
+    """Log a concise summary of stream statistics."""
+    if 'traffic_item' not in stats or stream_id not in stats['traffic_item']:
+        st.log(f"No stats found for stream {stream_id}")
+        return
+    s = stats['traffic_item'][stream_id]
+    tx = s.get('tx', {})
+    rx = s.get('rx', {})
+    tx_pkts = tx.get('total_pkts', '0')
+    rx_pkts = rx.get('total_pkts', '0')
+    loss_pct = rx.get('loss_percent', 'N/A')
+    dropped = rx.get('dropped_pkts', 'N/A')
+    avg_lat = rx.get('avg_delay', 'N/A')
+    max_lat = rx.get('max_delay', 'N/A')
+    min_lat = rx.get('min_delay', 'N/A')
+    rx_port = rx.get('rx_port', 'N/A')
+    st.log(f"Stream {stream_id}: TX={tx_pkts} RX={rx_pkts} "
+           f"Loss%={loss_pct} Dropped={dropped} "
+           f"Latency(us) avg={avg_lat} min={min_lat} max={max_lat} "
+           f"RxPort={rx_port}")
 
 def clear_all_stats():
     tgen_handle.tg_traffic_control(action='clear_stats')
@@ -858,7 +943,10 @@ def modify_stream_rate(stream_info, gbps, frame_size=1350):
     """Modify the rate of an existing traffic stream in-place."""
     pps = gbps_to_pps(gbps, frame_size)
     tgen_handle.tg_traffic_config(mode='modify',
-        stream_id=stream_info['stream_id'], rate_pps=pps)
+        stream_id=stream_info['stream_id'], rate_pps=pps,
+        length_mode='fixed',
+        frame_size=frame_size,
+        high_speed_result_analysis=1)
 
 # Gigabits per second to packets per second with given frame size
 def gbps_to_pps(gbps, frame_size):
@@ -872,10 +960,23 @@ def delete_traffic_stream(stream_info):
     dealloc_tgen_ip(stream_info['dst_ip'])
     tgen_handle.tg_traffic_config(mode='remove',
         stream_id=stream_info['stream_id'])
-    tgen_handle.tg_interface_config(mode='destroy',
-        handle=stream_info['src_handle'])
-    tgen_handle.tg_interface_config(mode='destroy',
-        handle=stream_info['dst_handle'])
+    if tgen_handle.tg_type == 'stc':
+        # STC: destroy emulated device directly — the wrapper's mode='destroy'
+        # is broken (maps to cleanup_session which logs out the Aion session).
+        tgen_handle.tg_emulation_device_config(mode='delete',
+            handle=stream_info['src_handle'])
+        tgen_handle.tg_emulation_device_config(mode='delete',
+            handle=stream_info['dst_handle'])
+        # Remove from framework's cached handles so teardown doesn't re-destroy
+        tgen_handle.manage_interface_config_handles('destroy',
+            stream_info.get('src_port_handle'), stream_info['src_handle'])
+        tgen_handle.manage_interface_config_handles('destroy',
+            stream_info.get('dst_port_handle'), stream_info['dst_handle'])
+    else:
+        tgen_handle.tg_interface_config(mode='destroy',
+            handle=stream_info['src_handle'])
+        tgen_handle.tg_interface_config(mode='destroy',
+            handle=stream_info['dst_handle'])
 
 # ---------------------------------------------------------------------------
 # ECN Traffic Stream Utilities
@@ -1000,72 +1101,72 @@ def create_pfc_xoff_stream(tg_unused, tgen_port, src_mac, rate_fps, tc=3,
     st.log(f"Created PFC stream: {stream_id}")
 
     # WORKAROUND: HLTAPI doesn't properly set L2 fields for raw traffic.
-    # We must directly configure via IxNetwork API.
-    st.banner("Fixing L2 header via IxNetwork API")
-    try:
-        ixnet = get_ixnet()
+    # We must directly configure via IxNetwork API (IXIA only).
+    if tg_handle.tg_type == 'ixia':
+        st.banner("Fixing L2 header via IxNetwork API")
+        try:
+            ixnet = get_ixnet()
 
-        # Find the traffic item we just created
-        traffic_items = ixnet.getList('/traffic', 'trafficItem')
-        if not traffic_items:
-            st.error("No traffic items found!")
-            return stream_id
+            # Find the traffic item we just created
+            traffic_items = ixnet.getList('/traffic', 'trafficItem')
+            if not traffic_items:
+                st.error("No traffic items found!")
+                return stream_id
 
-        # Get the last traffic item (the one we just created)
-        ti = traffic_items[-1]
-        st.log(f"Configuring traffic item: {ti}")
+            # Get the last traffic item (the one we just created)
+            ti = traffic_items[-1]
+            st.log(f"Configuring traffic item: {ti}")
 
-        # Get config element and ethernet stack
-        ce = ixnet.getList(ti, 'configElement')[0]
-        stacks = ixnet.getList(ce, 'stack')
-        eth_stack = stacks[0]  # First stack is ethernet
-        fields = ixnet.getList(eth_stack, 'field')
+            # Get config element and ethernet stack
+            ce = ixnet.getList(ti, 'configElement')[0]
+            stacks = ixnet.getList(ce, 'stack')
+            eth_stack = stacks[0]  # First stack is ethernet
+            fields = ixnet.getList(eth_stack, 'field')
 
-        # Find and set L2 fields
-        # Check field path (not -name attribute) as it contains the field identifier
-        for f in fields:
-            st.log(f"Processing field: {f}")
-            if 'destinationAddress' in f:
-                ixnet.setAttribute(f, '-singleValue', PFC_DST_MAC)
-                st.log(f"Set dst_mac: {PFC_DST_MAC}")
-            elif 'sourceAddress' in f:
-                ixnet.setAttribute(f, '-singleValue', src_mac)
-                st.log(f"Set src_mac: {src_mac}")
-            elif 'etherType' in f:
-                # Must disable 'auto' mode for etherType first, then set value
-                ixnet.setAttribute(f, '-auto', 'false')
-                ixnet.setAttribute(f, '-singleValue', PFC_ETHERTYPE)
-                st.log(f"Set etherType: {PFC_ETHERTYPE} (auto=false)")
+            # Find and set L2 fields
+            # Check field path (not -name attribute) as it contains the field identifier
+            for f in fields:
+                st.log(f"Processing field: {f}")
+                if 'destinationAddress' in f:
+                    ixnet.setAttribute(f, '-singleValue', PFC_DST_MAC)
+                    st.log(f"Set dst_mac: {PFC_DST_MAC}")
+                elif 'sourceAddress' in f:
+                    ixnet.setAttribute(f, '-singleValue', src_mac)
+                    st.log(f"Set src_mac: {src_mac}")
+                elif 'etherType' in f:
+                    # Must disable 'auto' mode for etherType first, then set value
+                    ixnet.setAttribute(f, '-auto', 'false')
+                    ixnet.setAttribute(f, '-singleValue', PFC_ETHERTYPE)
+                    st.log(f"Set etherType: {PFC_ETHERTYPE} (auto=false)")
 
-        ixnet.commit()
-        st.log("IxNetwork L2 header configuration committed")
+            ixnet.commit()
+            st.log("IxNetwork L2 header configuration committed")
 
-        # CRITICAL: After modifying traffic config via low-level API, must regenerate
-        # This is equivalent to "Generate" in the IxNetwork GUI
-        # Must call 'generate' on each traffic item individually, then 'apply' on /traffic
-        st.log("Regenerating all traffic items...")
-        for traffic_item in traffic_items:
-            ti_name = ixnet.getAttribute(traffic_item, '-name')
-            st.log(f"  Generating: {ti_name}")
-            ixnet.execute('generate', traffic_item)
-        st.log("All traffic items regenerated")
+            # CRITICAL: After modifying traffic config via low-level API, must regenerate
+            # This is equivalent to "Generate" in the IxNetwork GUI
+            # Must call 'generate' on each traffic item individually, then 'apply' on /traffic
+            st.log("Regenerating all traffic items...")
+            for traffic_item in traffic_items:
+                ti_name = ixnet.getAttribute(traffic_item, '-name')
+                st.log(f"  Generating: {ti_name}")
+                ixnet.execute('generate', traffic_item)
+            st.log("All traffic items regenerated")
 
-        # Apply traffic to push to hardware (equivalent to "Apply" in the GUI)
-        st.log("Applying traffic to hardware...")
-        ixnet.execute('apply', '/traffic')
-        st.log("Traffic applied to hardware")
+            # Apply traffic to push to hardware (equivalent to "Apply" in the GUI)
+            st.log("Applying traffic to hardware...")
+            ixnet.execute('apply', '/traffic')
+            st.log("Traffic applied to hardware")
 
-        # Wait for IxNetwork to fully push to hardware
-        st.wait(3)
-        st.log("Generate/apply complete")
+            # Wait for IxNetwork to fully push to hardware
+            st.wait(3)
+            st.log("Generate/apply complete")
 
-    except Exception as e:
-        st.error(f"Failed to configure L2 header via IxNetwork API: {e}")
-        import traceback
-        st.log(traceback.format_exc())
+        except Exception as e:
+            st.error(f"Failed to configure L2 header via IxNetwork API: {e}")
+            import traceback
+            st.log(traceback.format_exc())
 
     return stream_id
-
 
 def create_pfc_xoff_burst_stream(tg_unused, tgen_port, src_mac, rate_fps,
                                  pkts_per_burst, burst_loop_count,
@@ -1202,3 +1303,12 @@ def create_pfc_xoff_burst_stream(tg_unused, tgen_port, src_mac, rate_fps,
         st.log(traceback.format_exc())
 
     return stream_id
+
+def release_all_ports():
+    if tgen_handle.tg_type == 'stc':
+        try:
+            tgen_handle.local_stc_tapi_call(
+                'stc::perform DetachPorts -PortList "port1 port2 port3"')
+            tgen_handle.local_stc_tapi_call('stc::apply')
+        except Exception:
+            pass

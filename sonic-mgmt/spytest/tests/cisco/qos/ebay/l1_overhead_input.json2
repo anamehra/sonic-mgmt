@@ -1,0 +1,13 @@
+# L1 overhead validation test input
+# Specify which DUT node to use (must have 2 tgen ports: 1 high-speed ingress, 1 lower-speed egress)
+# # For 1-node testbed: "D1"
+# For 2-node testbeds: "D2"
+# For 4-node testbeds: "D3" or "D4" depending on topology
+{
+    "L1_OVERHEAD_TEST" : {
+            # DUT node with 2 tgen ports (ingress > egress speed)
+            "node" : "D1",
+            # Frame sizes to sweep
+            "frame_sizes" : [256, 512, 1024, 1350, 9000]
+    }
+}

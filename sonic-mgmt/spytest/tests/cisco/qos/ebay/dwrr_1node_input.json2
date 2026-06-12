@@ -1,0 +1,13 @@
+# This is enhanced json file which allows comments starting with pound '#'
+# 1-node DWRR test: T1D1P1 (400G) -> DUT --> T1D1P2 (100G)
+# Weights are pre-configured on DUT (Newtonic/eBay DWRR scheduler)
+# No scheduler CLI changes needed - just verify existing config behavior
+{
+    "DWRR_TEST" : {
+            # TC pairs to test (each pair competes for egress bandwidth)
+            "tc_pair" : [["0", "2"], ["0", "3"], ["2", "3"], ["0", "4"], ["1", "7"], ["2", "4"]],
+            "frame_sizes" : ["1350"],
+            # Duration in seconds per iteration
+            "run_time" : 60
+    }
+}

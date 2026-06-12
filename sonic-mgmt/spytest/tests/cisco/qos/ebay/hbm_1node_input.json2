@@ -1,0 +1,8 @@
+# HBM rate sweep test input
+# frame_sizes: list of frame sizes to sweep
+# Rates are computed dynamically from port speeds
+{
+    "HBM_TEST" : {
+            "frame_sizes" : [64, 512, 1024, 1350, 3072, 5120, 6144, 7168, 7900, 8192, 8200, 8400, 8800, 9000]
+    }
+}
