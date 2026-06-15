@@ -2522,6 +2522,47 @@
             },
             "spytest_container_202511": "spytest-platform-hardening-202511",
             "spytest_file_base_202511": "202511"
+        },
+        "titan-2leaf-2spine-spytest": {
+            "ucs_host_name": "sonic-ucs-m7-f8",
+            "ucs_host": "172.25.164.55",
+            "ucs_username": "sonic",
+            "ucs_password": "roZes@123",
+            "mth_tb": "titan-2by2-hw-dut",
+            "scp_ip": "172.25.164.55",
+            "installer_mode": "sonic",
+            "ucs_tb": "titan-2by2",
+            "deploy_flag": "False",
+            "telnet_host": ["172.25.164.31", "172.25.164.31"],
+            "telnet_port": ["2011", "2010"],
+            "telnet_details": ["172.25.164.31 2011", "172.25.164.31 2010"],
+            "dut_ssh": ["172.25.164.42", "172.25.164.43"],
+            "topology": "dev-cicd-b2b",
+            "telnet_flag": "False",
+            "docker_prompt": "@sonic-ucs-m7-f8",
+            "run_type_check": "titan-2leaf-2spine-spytest_dev-cicd-b2b",
+            "sonic_installer_commands": [
+                "sudo show boot",
+                "sudo sonic-installer install $image_url -y",
+                "sudo show boot"
+            ],
+            "skip_tests": "",
+            "skip_folder": "",
+            "allure_flag": "false",
+            "external_ucs": "none",
+            "collect_spytest_flag": "true",
+            "testbed_yaml": "/data/spytest_tb_files/titan_2by2_spytest.yaml",
+            "testbed-setup": {
+                "cmd": [
+                    "set -e",
+                    "git clone --progress --verbose --recursive $SANITY_SUITE_REPO -b $SANITY_SUITE_BRANCH ./",
+                    "cd ./infra",
+                    "python3 ./do_hw_setup.py fetch-pipeline -t $TEST_BED",
+                    "python3 ./do_hw_setup.py onie -i sonic -t $TEST_BED"
+                ]
+            },
+            "spytest_container_202511": "spytest-platform-hardening-202511",
+            "spytest_file_base_202511": "spytest/macsec-platform-hardening-202511"
         }
     },
     "testbed-streams" : {
@@ -2712,6 +2753,9 @@
         ],
         "mtfuji-cmono-spytest-plat": [
             "cisco.202505.1.signed"
+        ],
+        "titan-2leaf-2spine-spytest": [
+            "cisco.202511.2.signed"
         ]
     },
     "testbeds": {
@@ -2719,7 +2763,7 @@
         "t1" : ["t1-m6-22-m64", "t1-m5-5-cmono", "t1-topo5", "t1-m6-18-MtFuji", "t1-m6-27-m64", "t1-m4-3-croc", "t1-m5-2-m64", "t1-m3-4-cmono", "t1-m6-23-superbolt", "t1-m5-16-lightning", "t1-m5-11-hbm", "t1-m6-26-cmono", "t1-m6-37-tornado"],
         "t2" : ["aaa14-t2", "t2-m6-30-titan"],
         "dualtor" : ["dualtor-m6-30-tornado", "dualtor-m6-31-tornado", "dualtor-m6-42-tornado", "mathilda-dualtor-t0-1", "mathilda-dualtor-m5-6"],
-        "dev-cicd-b2b": ["mtfuji-spytest-plat", "lightning-spytest-plat", "arctos-spytest-plat", "superbolt-titan-spytest-plat", "mtfuji-cmono-spytest-plat", "apple-ipfabric-m64"]
+        "dev-cicd-b2b": ["mtfuji-spytest-plat", "lightning-spytest-plat", "arctos-spytest-plat", "superbolt-titan-spytest-plat", "mtfuji-cmono-spytest-plat", "apple-ipfabric-m64", "titan-2leaf-2spine-spytest"]
     },
     "testbed_image_ucs_map" : {
         "t1-m6-22-m64":"ucs_m6_22",
@@ -2779,7 +2823,8 @@
 	"t0-m6-17-1-titan":"ucs_m6_17_1_titan",
         "superbolt-titan-spytest-plat": "m6_platform",
         "mtfuji-cmono-spytest-plat": "m6_platform",
-        "superbolt-t0-m6-2-10": "ucs_m6_02_bolt"
+        "superbolt-t0-m6-2-10": "ucs_m6_02_bolt",
+        "titan-2leaf-2spine-spytest": "ucs_titan_2by2"
     },
     "file_server_dict" : {
         "ucs_m3_1" : {
@@ -3094,6 +3139,15 @@
             "username": "sonic",
             "password": "roZes@123",
             "scp_prompt" : "sonic@sonic-ucs-m6-49:/var/www/html/IMAGES",
+            "images_folder" : "/var/www/html/IMAGES",
+            "wget" : "http_proxy= https_proxy= wget"
+        },
+        "ucs_titan_2by2": {
+            "host": "sonic-ucs-m7-f8",
+            "ip": "172.25.164.55",
+            "username": "sonic",
+            "password": "roZes@123",
+            "scp_prompt" : "sonic@172.25.164.55:/var/www/html/IMAGES",
             "images_folder" : "/var/www/html/IMAGES",
             "wget" : "http_proxy= https_proxy= wget"
         }

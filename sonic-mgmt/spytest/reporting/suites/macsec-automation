@@ -1,0 +1,14 @@
+# Modules
++file:macsec/test_macsec.py
+
+# Runtime Arguments
++args:--device-feature-group master
++args:-rA
++args:--topology-check=skip
++args:--skip-init-checks
++args:--skip-init-config
++args:--port-init-wait=2
++args:--get-tech-support none
++args:--module-init-max-timeout=7200000
++args:--tc-max-timeout=7200000
++args:--random-order=0

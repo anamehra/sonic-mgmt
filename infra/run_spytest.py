@@ -601,7 +601,7 @@ def run_sanity(topology, platform, script_file, test_bed=None):
               f"--logs-path spytest_results/{run_results_subdir} --test-suite /data/{script_file}\n"
         execute_command_on_chan(chan, cmd, show_output=True)
 
-        cmd = f"echo 'Updating permissions of results file to ensure availability.'; cd /data/spytest_results/{run_results_subdir}; chmod -R 644 *\n"
+        cmd = f"echo 'Updating permissions of results file to ensure availability.'; cd /data/spytest_results/{run_results_subdir}; chmod -R a+rX .\n"
         execute_command_on_chan(chan, cmd, show_output=True)
 
     else:
