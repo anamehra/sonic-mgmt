@@ -179,7 +179,9 @@ def upload_log_files_to_log_server(files_to_copy):
         if os.path.exists(file_name):
             if os.path.isdir(file_name):
                 dest = os.path.join(build_id, os.path.basename(file_name))
-                shutil.copytree(file_name, dest, dirs_exist_ok=True)
+                if os.path.exists(dest):
+                    shutil.rmtree(dest)
+                shutil.copytree(file_name, dest)
             else:
                 shutil.copy(file_name, build_id)
             uploaded_files.append(file_name)

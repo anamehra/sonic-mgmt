@@ -1,5 +1,3 @@
-#!/router/bin/python3.8.2_mcpre-v1
-
 # Creates the t1 topology using vxr.py
 # Create admin user in vEOS vm
 # Create testbed file based on vxr_ports
@@ -1170,7 +1168,7 @@ def start_vxr(input_file, cicd, clean_sim, topo_yaml):
         os.system("{} clean".format(vxr_path))
 
     if cicd:
-        vxr_path = "python3.8 /auto/vxr/pyvxr/pyvxr-latest/vxr.py"
+        vxr_path = "python3 /auto/vxr/pyvxr/pyvxr-latest/vxr.py"
 
     os.system("bash -c '{} start {} |& tee sim_op.log'".format(vxr_path, topo_yaml))
 
