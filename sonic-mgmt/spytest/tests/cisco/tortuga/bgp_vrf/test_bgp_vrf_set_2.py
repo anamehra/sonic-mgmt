@@ -300,10 +300,23 @@ def test_bgp_vrf_delete_vrf_instance():
     # stay deleted for the rest of the run, breaking every subsequent test
     # in this module AND poisoning the next module (test_l2vni_v6_vtep.py
     # uses D3D2P1 which is bound to Vrf01 by bgp_basic_cfg.yaml setup).
-    sonic_restore_cmds = ['sudo config vrf add Vrf01',
-                          'sudo config interface vrf bind {} Vrf01'.format(vars.D3D2P1),
-                          'sudo config interface ip add {} 20.1.1.1/24'.format(vars.D3D2P1)]
-    frr_restore_cmds = ['router bgp 2002 vrf Vrf01',
+    # vrf del drops all Vrf01-bound interfaces and their IPs (D3D2P1,
+    # Loopback1, D3D2P2, Loopback3); rebuild the full YAML leaf0 Vrf01
+    # state before restoring FRR so 20::1 update-source and module teardown
+    # IP removals succeed.
+    vrf01_sonic_rebuild = [
+        'sudo config vrf add Vrf01',
+        'sudo config interface vrf bind {} Vrf01'.format(vars.D3D2P1),
+        'sudo config interface vrf bind Loopback1 Vrf01',
+        'sudo config interface vrf bind {} Vrf01'.format(vars.D3D2P2),
+        'sudo config interface vrf bind Loopback3 Vrf01',
+        'sudo config interface ip add {} 20.1.1.1/24'.format(vars.D3D2P1),
+        'sudo config interface ip add {} 20::1/64'.format(vars.D3D2P2),
+        'sudo config interface ip add Loopback1 192.168.0.2/32',
+        'sudo config interface ip add Loopback3 192::1:2/128'
+    ]
+    vrf01_bgp_rebuild = [
+        'router bgp 2002 vrf Vrf01',
         'no bgp ebgp-requires-policy',
         'no bgp network import-check',
         'neighbor 20.1.1.2 remote-as 1003',
@@ -324,6 +337,9 @@ def test_bgp_vrf_delete_vrf_instance():
         cmd = 'no router bgp 2002 vrf Vrf01'
         config_frr(nodes['leaf0'], cmd)
 
+        if not _wait_for_frr_bgp_vrf_drained(nodes['leaf0'], 'Vrf01'):
+            st.report_fail("test_case_failed", nodes['leaf0'])
+
         cmd = 'sudo config vrf del Vrf01'
         st.config(nodes['leaf0'], cmd)
 
@@ -335,7 +351,7 @@ def test_bgp_vrf_delete_vrf_instance():
             st.report_fail("test_case_failed", nodes['leaf0'])
     finally:
         # SONiC re-add. Each step is guarded.
-        for cleanup_cmd in sonic_restore_cmds:
+        for cleanup_cmd in vrf01_sonic_rebuild:
             try:
                 st.config(nodes['leaf0'], cleanup_cmd)
             except Exception as e:
@@ -350,7 +366,7 @@ def test_bgp_vrf_delete_vrf_instance():
                 skip_tmpl=True, skip_error_check=True)
         # FRR BGP re-add (after the VRF interface is up).
         try:
-            config_frr(nodes['leaf0'], frr_restore_cmds)
+            config_frr(nodes['leaf0'], vrf01_bgp_rebuild)
         except Exception as e:
             st.log("cleanup: restore Vrf01 BGP on leaf0 failed: {}".format(e))
 
@@ -795,7 +811,8 @@ def test_bgp_vrf_changing_vrf_locally():
         cmd = 'no router bgp 2002 vrf Vrf01'
         config_frr(nodes['leaf0'], cmd)
 
-        time.sleep(1)
+        if not _wait_for_frr_bgp_vrf_drained(nodes['leaf0'], 'Vrf01'):
+            st.report_fail("test_case_failed", nodes['leaf0'])
 
         cmd = 'sudo config vrf del Vrf01'
         st.config(nodes['leaf0'], cmd)

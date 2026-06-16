@@ -75,6 +75,10 @@ leaf0:
         sudo config interface ip rem D3D2P1 20.1.1.1/24
         sudo config interface ip rem D3D1P2 10::2/24
         sudo config interface ip rem D3D2P2 20::1/64
+        sudo config interface vrf unbind D3D2P1
+        sudo config interface vrf unbind Loopback1
+        sudo config interface vrf unbind D3D2P2
+        sudo config interface vrf unbind Loopback3
         sudo config vrf del Vrf01
 
     bgp:
@@ -153,6 +157,12 @@ spine1:
         sudo config interface ip rem D2D3P1 20.1.1.2/24
         sudo config interface ip rem D2D4P1 30.1.1.1/24
         sudo config interface ip rem D2D3P2 20::2/24
+        sudo config interface vrf unbind D2D3P1
+        sudo config interface vrf unbind D2D4P1
+        sudo config interface vrf unbind D2D3P2
+        sudo config interface vrf unbind Loopback0
+        sudo config interface vrf unbind Loopback1
+        sudo config interface vrf unbind Loopback2
         sudo config vrf del Vrf01
         sudo config vrf del Vrf02
 
@@ -206,6 +216,8 @@ leaf1:
       deconfig: |
         sudo config interface ip rem Loopback0 192.168.1.4/32
         sudo config interface ip rem D4D2P1 30.1.1.2/24
+        sudo config interface vrf unbind D4D2P1
+        sudo config interface vrf unbind Loopback0
         sudo config vrf del Vrf02
 
     bgp:
