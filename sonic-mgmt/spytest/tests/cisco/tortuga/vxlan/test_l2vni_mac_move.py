@@ -288,7 +288,7 @@ def test_l2vni_mac_move_with_intfdown():
     # port shut. If either startup fails, downstream tests that use
     # D3T1P1/D4T1P1 will see no traffic and the next module that does
     # tgen_preconfig on these ports will cascade. The test result itself
-    # is NOT changed to fail — see the A1 design note in the bgp_vrf
+    # is NOT changed to fail - see the A1 design note in the bgp_vrf
     # module teardowns for the rationale.
     cleanup_issues = []
     streams_basic, handles_basic = traffic_setup_basic()

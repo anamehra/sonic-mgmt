@@ -189,7 +189,7 @@ def test_dhcp_l2vni_ipv4_basic_new_design():
     # Accumulate any cleanup-step failures so a human reading the log gets
     # a single greppable banner when this test leaves residue (Vlan2
     # gateway IP on D4 stuck, or dhcp_relay not re-enabled). The test
-    # result itself is NOT changed to fail — see the A1 design note in
+    # result itself is NOT changed to fail - see the A1 design note in
     # the bgp_vrf module teardowns for the rationale.
     cleanup_issues = []
     # The Vlan2 gateway IP add on D4 and the dhcp_relay disable on both leafs

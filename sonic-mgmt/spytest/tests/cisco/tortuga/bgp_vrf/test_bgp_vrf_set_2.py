@@ -883,7 +883,7 @@ def test_bgp_vrf_changing_vrf_locally():
         # SONiC to delete the VRF. zebra can retain VRF/interface bindings
         # for several seconds after `no router bgp ... vrf Vrf10`; with a
         # naked `time.sleep(1)` here, `sudo config vrf del Vrf10` can fail
-        # or no-op and leave Vrf10 residue on D3 — and Vrf10 is NOT covered
+        # or no-op and leave Vrf10 residue on D3 - and Vrf10 is NOT covered
         # by the YAML module teardown (only Vrf01 is), so the residue would
         # cascade. Logged-only on timeout: the unwind continues either way
         # so the subsequent Vrf01 rebuild still gets a chance to run.

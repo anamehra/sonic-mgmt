@@ -407,7 +407,7 @@ def test_v6_vtep_acl():
     result = False
     # Accumulate any cleanup-step failures so a human reading the log gets
     # a single greppable banner when this test leaves ACL residue on
-    # leaf1 ports. The test result itself is NOT changed to fail — see
+    # leaf1 ports. The test result itself is NOT changed to fail - see
     # the A1 design note in the bgp_vrf module teardowns for the
     # rationale.
     cleanup_issues = []
