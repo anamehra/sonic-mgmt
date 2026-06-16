@@ -2521,7 +2521,9 @@
                 ]
             },
             "spytest_container_202511": "spytest-platform-hardening-202511",
-            "spytest_file_base_202511": "202511"
+            "spytest_file_base_202511": "202511",
+            "spytest_container_202605": "spytest-platform-hardening-202605",
+            "spytest_file_base_202605": "202605"
         },
         "titan-2leaf-2spine-spytest": {
             "ucs_host_name": "sonic-ucs-m7-f8",
@@ -2752,7 +2754,9 @@
             "cisco.202511.signed"
         ],
         "mtfuji-cmono-spytest-plat": [
-            "cisco.202505.1.signed"
+            "cisco.202505.1.signed",
+            "cisco.202511.1.signed",
+            "cisco.202605.signed"
         ],
         "titan-2leaf-2spine-spytest": [
             "cisco.202511.2.signed"
