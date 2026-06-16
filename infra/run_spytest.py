@@ -712,7 +712,7 @@ def collect_result():
             if "=" not in line:
                 continue
 
-            key, value = line.split("=")
+            key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip()
 
@@ -747,7 +747,12 @@ def collect_result():
                 }
             tc_details[script_name]['TC_INFO'].append(case_summary)
 
-        sum["success_rate"] = round(sum["passed"] / (sum["total"] - sum["skipped"]) * 100, 2)
+        executed_tests = sum["total"] - sum["skipped"]
+        if executed_tests > 0:
+            sum["success_rate"] = round(sum["passed"] / executed_tests * 100, 2)
+        else:
+            print("No executed test cases found; all collected test cases were skipped")
+            sum["success_rate"] = 0.0
 
         if sum["success_rate"] == 100:
             sum["status"] = SUCCESS_STATUS
@@ -756,8 +761,8 @@ def collect_result():
             sum["failure_reason"] = FAILURE_RESONS.TEST_CASES_FAILED
 
     except Exception as e:
-        print("Exception! Failed to open result file!")
-        sum["status"] = "failure"
+        print(f"Exception! Failed to open or parse result file: {e}")
+        sum["status"] = FAILURE_STATUS
         sum["failure_reason"] = FAILURE_RESONS.NO_REPORT_FILE
         ret = 1
 
