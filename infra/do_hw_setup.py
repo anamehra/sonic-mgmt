@@ -17,7 +17,7 @@ from hw_setup_utils import log, lower_pass_prompt, sshUtil, sshDUTUtil, extractF
     DUT_PASSWORD, DUT_USERNAME, BIN_FILE, telnet_escape_prompt, grub_selection, KEY_DOWN, newline_prompt, KEY_UP, checkForDockers, \
     scpUtil, sonic_prompt, getDockerExecCommand, copyDockerFileToDut, getSonicMgmtContainterName, get_container_local_mount_dir, \
     default_info, getSonicMgmtFolder, MAX_RETRIES, MAX_RETRIES_TIMEOUT, ALLURE_CONFIG_FILE_NAME, checkStreamCompatibility, checkTestbedAvailability, \
-    channelConnection, checkTortugaImage, CISCO_PASSWORD, CISCO_USERNAME, getBranchFromStream
+    channelConnection, checkTortugaImage, CISCO_PASSWORD, CISCO_USERNAME, getBranchFromStream, nested_ssh_connection
 from utils import _run_cmd_in_ssh
 
 
@@ -985,8 +985,41 @@ def sonic_install(args, index):
                 if rc!=0:
                     log.error("Execution failed in extra_sonic_commands")
 
-    # sleep for 5 minutes and check for docker after reboot
-    time.sleep(300)
+    # wipe residual files from the previous image(s)
+    log.info("Manually removing logs and dumps that aren't relevant for the current image")
+    cleanup_commands = [  # taken from cisco/install_image/install_image.py
+        "df -h",
+        "sudo rm -v /var/dump/*",
+        "sudo rm -v /var/core/*",
+        "sudo rm -v /var/log/syslog.*",
+        "sudo rm -v /var/log/auth.log.*",
+        "sudo rm -v /var/log/stpd.log.*",
+        "sudo rm -v /var/log/otel.log.*",
+        "sudo rm -v /var/log/gnmi.log.*",
+        "sudo rm -v /var/log/telemetry.log.*",
+        "sudo rm -v /var/log/cron.log.*",
+        "sudo rm -v /var/log/teamd.log.*",
+        "sudo rm -v /var/log/swss/sairedis*rec.*",
+        "sudo rm -v /var/log/swss/swss*rec.*",
+        "df -h",
+    ]
+    for dut_ssh in testbed_info_dict['dut_ssh']:
+        log.info(f"Processing cleanup for dut {dut_ssh}")
+        target_client, bastion_client = nested_ssh_connection(
+            testbed_info_dict["ucs_host_name"],
+            testbed_info_dict["ucs_username"],
+            testbed_info_dict["ucs_password"],
+            dut_ssh,
+            DUT_USERNAME,
+            DUT_PASSWORD,
+            retry=True,
+        )
+        for cleanup_command in cleanup_commands:
+            out, err, rc = _run_cmd_in_ssh(target_client, cleanup_command)
+        target_client.close()
+        bastion_client.close()
+        log.info(f"Done processing cleanup for {dut_ssh}")
+
     checkForDockersSonic(testbed, stream, index)
 
 def telnet_run_sonic_pre_post_commands(args, index, pre_sonic=True):

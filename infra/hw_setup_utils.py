@@ -1317,73 +1317,38 @@ def extractFromImageName(image_name):
     
     return [image, image_id, stream]
 
-def run_exec_cmds(thread, cmd_list):
-    for cmd in cmd_list:
-        stdin, stdout, stderr = thread.exec_command(cmd)
-        stdout.channel.recv_exit_status()
-        try:
-            out = stdout.read().decode("ascii").strip()
-            error = stderr.read()
-            log.debug(out)
-            if error:
-                log.error('There was an error pulling the runtime: {}'.format(error))
-        except:
-            log.debug("Problem decoding output of ssh command")
-    return thread
-
 def getTechSupport(client, local_log_dir):
     log.debug("Entered getTechSupport")
-    
-    try:
-        cmd_list = list()
-        cmd_list.append("pwd")
-        cmd_list.append("show techsupport")
-        client = run_exec_cmds(client, cmd_list)
-        file_path = copy_techsupport(client, local_log_dir)
-        log.debug(f"file_path: {file_path}")
-
-        return 0
-    
-    except Exception as e:
-        print(f"An error occurred in getTechSupport: {e}")
-        return -1
-        
+    out, error, status = _run_cmd_in_ssh(client, "show techsupport", timeout=500)
+    file_path = copy_techsupport(client, local_log_dir)
+    log.debug(f"Techsupport file_path: {file_path}")
     
 def copy_techsupport(ssh, local_log_dir):
     log.debug("Entered copy_techsupport")
 
     ts_dir='/var/dump'
 
-    try:
-        # Open an SFTP session
-        sftp = ssh.open_sftp()
+    # Open an SFTP session
+    sftp = ssh.open_sftp()
 
-        # List all files in the remote directory
-        # files = sftp.listdir_attr(ts_dir)
-        files = [(f.filename, f) for f in sftp.listdir_attr(ts_dir)]
+    # List all files in the remote directory
+    # files = sftp.listdir_attr(ts_dir)
+    files = [(f.filename, f) for f in sftp.listdir_attr(ts_dir)]
 
-        if not files:
-            print("No files found in the directory.")
-            return None
+    log.debug(f"file_list: {files}")
+    # Find the latest file by modification time
+    latest_file = max(files, key=lambda x: x[1].st_mtime)[0]
+    log.debug(f"Latest file: {latest_file}")
+    # latest_file = max(files, key=lambda x: x.st_mtime)
+    latest_file_path = os.path.join(ts_dir, latest_file)
+    log.debug(latest_file_path)
+    remote_path = f'{local_log_dir}/{latest_file}'
+    sftp.get(latest_file_path, remote_path)
 
-        log.debug(f"file_list: {files}")
-        # Find the latest file by modification time
-        latest_file = max(files, key=lambda x: x[1].st_mtime)[0]
-        log.debug(f"Latest file: {latest_file}")
-        # latest_file = max(files, key=lambda x: x.st_mtime)
-        latest_file_path = os.path.join(ts_dir, latest_file)
-        log.debug(latest_file_path)
-        remote_path = f'{local_log_dir}/{latest_file}'
-        sftp.get(latest_file_path, remote_path)
+    # Close the SFTP session and SSH connection
+    sftp.close()
 
-        # Close the SFTP session and SSH connection
-        sftp.close()
-
-        return latest_file
-
-    except Exception as e:
-        print(f"An error occurred in copy_techsupport: {e}")
-        return None
+    return latest_file
 
 def channelConnection(bastion_client, target_host, target_user, target_key):
     log.debug(f"channel connection into {target_host}")

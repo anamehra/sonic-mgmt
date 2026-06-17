@@ -387,14 +387,16 @@ def run_test(args):
     time.sleep(120)
     client.close()
 
-    for dut in testbed_info_dict['dut_ssh']:
-        log.debug(f"Collect show tech logs for dut: {dut}")
-        target_client, bastion_client = nested_ssh_connection(testbed_info_dict["ucs_host_name"], testbed_info_dict["ucs_username"], testbed_info_dict["ucs_password"], dut, DUT_USERNAME, DUT_PASSWORD, True)
-        rc = getTechSupport(target_client, local_log_dir)
-        if rc!=0:
-            log.error(f"Tech support failure")
-        target_client.close()
-        bastion_client.close()
+    # `show techsupport` is not relevant for artificial pre- and posttest calls
+    if test_suites_arg not in ['test_pretest.py', 'test_posttest.py']:
+        for dut in testbed_info_dict['dut_ssh']:
+            log.debug(f"Collect show tech logs for dut: {dut}")
+            target_client, bastion_client = nested_ssh_connection(testbed_info_dict["ucs_host_name"], testbed_info_dict["ucs_username"], testbed_info_dict["ucs_password"], dut, DUT_USERNAME, DUT_PASSWORD, True)
+            getTechSupport(target_client, local_log_dir)
+            target_client.close()
+            bastion_client.close()
+    else:
+        log.debug(f"Techsupport collection skipped because test_suites_arg={test_suites_arg}.")
 
     # Bundle the log files into one location
     os.chdir(local_log_parent_dir)
