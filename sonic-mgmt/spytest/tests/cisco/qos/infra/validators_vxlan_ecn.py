@@ -415,6 +415,13 @@ NATURAL_DEMAND_THRESHOLD_PCT = 100.0
 # load (uncongested) or of the egress line rate (congested).
 EFFECTIVE_TX_FLOOR = 0.90
 
+# Small-frame relaxation: at very small frame sizes the egress-leaf
+# TGEN-facing port is PPS-limited (host pipeline / decap cost dominates),
+# so byte-rate floors below this work even on a healthy DUT. The
+# threshold is the L2 frame size at/below which we relax the floor.
+SMALL_FRAME_BYTES = 128
+SMALL_FRAME_TX_FLOOR = 0.75
+
 # Gamut (n9164e) tends to emit a tiny burst of PFC XOFF (typically 2 frames)
 # on the first VxLAN-encap packet at flow start, then smooths out. Treat
 # pfc_tx counts at/below this threshold as noise for the natural-congestion
@@ -475,19 +482,31 @@ def validate_natural_congestion(bundle, rules=None):
     """Natural-congestion (no PFC XOFF stream) verdict at the marking node.
 
     Computes whether the ingress leaf's egress fabric link is over-subscribed
-    purely from the ingress TGEN load + VXLAN encap overhead:
+    purely from the ingress TGEN load + VXLAN encap overhead. The demand
+    ratio uses true on-wire bytes (frame + preamble + IPG) on both sides so
+    the +20B per-frame fixed overhead doesn't get double-counted as encap:
 
-        overhead_pct = (ENCAP_BYTES / frame_size) * 100
+        on_wire_in   = frame_size + 20
+        on_wire_out  = frame_size + ENCAP_BYTES + 20
         demand_pct   = ingress_load_pct
-                       * (1 + overhead_pct/100)
+                       * (on_wire_out / on_wire_in)
                        * (ingress_bw / egress_bw)
         congested    = demand_pct > 100
 
+    overhead_pct = (on_wire_out / on_wire_in - 1) * 100 is reported in
+    metrics for visibility.
+
     Then asserts on the marking node (typically leaf0):
       - congested  : ecn_marked > 0  AND  pfc_tx > 0
-                     AND effective_tx_gbps >= 0.90 * egress_bw
+                     AND effective_tx_gbps >= 0.90 * egress_path_bw
       - uncongested: ecn_marked == 0 AND  pfc_tx == 0
-                     AND effective_tx_gbps >= 0.90 * (ingress_load_pct/100 * ingress_bw)
+                     AND effective_tx_gbps >= 0.90 * min(
+                             ingress_load_pct/100 * ingress_bw,
+                             egress_path_bw)
+
+    egress_path_bw = min(fabric_egress_bw, egress_leaf_tgen_port_bw) so the
+    floor is bounded by the actual downstream bottleneck (the egress leaf's
+    TGEN-facing port, where effective_tx_gbps is measured).
 
     Effective TX is measured as the egress leaf's TGEN-facing port TX rate
     (or RX at the same port if TX is not populated by the snapshot).
@@ -559,13 +578,18 @@ def validate_natural_congestion(bundle, rules=None):
             'cannot determine ingress/egress speeds for {} (got ingress={} egress={})'
             .format(ileaf, ingress_bw, egress_bw))
 
-    overhead_pct = (ENCAP_BYTES / float(frame_size)) * 100.0
-    demand_pct = ingress_load_pct * (1.0 + overhead_pct / 100.0) * (float(ingress_bw) / float(egress_bw))
+    on_wire_in = float(frame_size + 20)   # preamble (8) + IPG (12)
+    on_wire_out = float(frame_size + ENCAP_BYTES + 20)
+    overhead_pct = (on_wire_out / on_wire_in - 1.0) * 100.0
+    demand_pct = ingress_load_pct * (on_wire_out / on_wire_in) * (float(ingress_bw) / float(egress_bw))
     congested = demand_pct > NATURAL_DEMAND_THRESHOLD_PCT
 
     # Effective TX measured at the egress leaf TGEN-facing port (towards
-    # the receiving TGEN) using DUT counters.
+    # the receiving TGEN) using DUT counters. Also capture that port's
+    # speed so the tx_floor is bounded by the actual downstream bottleneck
+    # rather than the (possibly larger) fabric uplink.
     effective_tx_gbps = 0.0
+    eleaf_tgen_bw = 0
     if egress_leaves and traffic_run_time > 0:
         eleaf = egress_leaves[0]
         eleaf_ports = (snap.get(eleaf, {}) or {}).get('ports', {}) or {}
@@ -574,6 +598,14 @@ def validate_natural_congestion(bundle, rules=None):
             tx_pkts = int(eleaf_ports[eleaf_tgen].get('tx_packets', 0) or 0)
             on_wire_bytes = frame_size + 20  # preamble (8) + IPG (12)
             effective_tx_gbps = (tx_pkts * on_wire_bytes * 8.0) / float(traffic_run_time) / 1e9
+            eleaf_tgen_bw = int(
+                (port_speeds_per_node.get(eleaf) or {}).get(eleaf_tgen, 0) or 0)
+
+    # The throughput floor must be bounded by the egress-leaf TGEN port
+    # speed, since that's where effective_tx_gbps is measured. On 2:1
+    # topologies the fabric egress (egress_bw) is faster than this port,
+    # so using egress_bw alone yields an unsatisfiable floor.
+    egress_path_bw = min(egress_bw, eleaf_tgen_bw) if eleaf_tgen_bw else egress_bw
 
     # Marking-node assertions.
     verdicts = []
@@ -602,6 +634,7 @@ def validate_natural_congestion(bundle, rules=None):
             'overhead_pct':         round(overhead_pct, 3),
             'ingress_bw_gbps':      ingress_bw,
             'egress_bw_gbps':       egress_bw,
+            'egress_path_bw_gbps':  egress_path_bw,
             'demand_pct':           round(demand_pct, 3),
             'congested':            congested,
             'ecn_marked':           ecn_marked,
@@ -610,8 +643,14 @@ def validate_natural_congestion(bundle, rules=None):
             'effective_tx_gbps':    round(effective_tx_gbps, 3),
         }
 
+        # Relax tx floor for small frames (egress port is PPS-limited).
+        tx_floor_fraction = (SMALL_FRAME_TX_FLOOR
+                             if frame_size <= SMALL_FRAME_BYTES
+                             else EFFECTIVE_TX_FLOOR)
+        metrics['tx_floor_fraction'] = tx_floor_fraction
+
         if congested:
-            tx_floor = EFFECTIVE_TX_FLOOR * float(egress_bw)
+            tx_floor = tx_floor_fraction * float(egress_path_bw)
             ok = (ecn_marked > 0) and (pfc_tx_effective > 0) and (effective_tx_gbps >= tx_floor)
             if ok:
                 reason = ('congested (demand={:.1f}%): ecn={} pfc_tx={} '
@@ -630,8 +669,10 @@ def validate_natural_congestion(bundle, rules=None):
                 reason = ('congested (demand={:.1f}%) but: {}'
                           .format(demand_pct, '; '.join(reasons)))
         else:
-            expected_tx_gbps = (ingress_load_pct / 100.0) * float(ingress_bw)
-            tx_floor = EFFECTIVE_TX_FLOOR * expected_tx_gbps
+            expected_tx_gbps = min(
+                (ingress_load_pct / 100.0) * float(ingress_bw),
+                float(egress_path_bw))
+            tx_floor = tx_floor_fraction * expected_tx_gbps
             ok = (ecn_marked == 0) and (pfc_tx_effective == 0) and (effective_tx_gbps >= tx_floor)
             if ok:
                 reason = ('uncongested (demand={:.1f}%): no marks/xoff, '

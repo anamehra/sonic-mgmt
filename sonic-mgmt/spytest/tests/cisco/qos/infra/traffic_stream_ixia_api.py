@@ -1,4 +1,5 @@
 import os
+import re
 import pytest
 import pprint
 from spytest import st, tgapi, SpyTestDict
@@ -215,8 +216,14 @@ def configure_tc_to_pg_map(dut, pg_map, map_name='AZURE'):
     st.log("Setting TC-to-PG map on {}: {}".format(dut, cmd))
     st.config(dut, cmd, skip_error_check=True)
 
-def init_qos_on_dut(dut, tc_list=[3, 4]):
-    """Reload QoS defaults and set the IXIA-compatible TC-to-PG map on a DUT."""
+def init_qos_on_dut(dut, tc_list=[3, 4], force=True):
+    """Reload QoS defaults and set the IXIA-compatible TC-to-PG map on a DUT.
+
+    force: defaults to True so every call unconditionally reloads QoS on
+    `dut` (bypassing the module-level `_qos_reloaded` cache in
+    perform_qos_reload). Pass force=False only if you know a previous
+    reload in this pytest session is sufficient.
+    """
 
     global tgen_handle
     global lossless
@@ -267,11 +274,11 @@ def init_qos_on_dut(dut, tc_list=[3, 4]):
             # Most tests are D3 based, so allow some down ports on D4
             st.report_fail('msg',
                 f"IXIA port {tokens[0]} is not up on {leaf} - aborting test")
-            
+
+    qos_test_utils.perform_qos_reload(dut, force=force)
     lossless = tc_list
     if len(pg_map_cache) == 0:
         pg_map_cache = build_tc_to_pg_map(tc_list)
-    qos_test_utils.perform_qos_reload(dut)
     if tgen_handle is None:
         # Use first available tgen port (works for any topology size)
         for _d in ['D1', 'D2', 'D3', 'D4']:
@@ -1312,3 +1319,43 @@ def release_all_ports():
             tgen_handle.local_stc_tapi_call('stc::apply')
         except Exception:
             pass
+
+
+def verify_interface_ping(src_obj, dev_handle, dst_ip, ping_count=5, exp_count=5):
+    """TGEN-driven ping helper. Returns True on success, False otherwise.
+
+    Supports stc/ixia/scapy TGENs. On IXIA the success criterion is that at
+    least `exp_count` of `ping_count` attempts had tx == rx.
+    """
+    ping_count, exp_count = int(ping_count), int(exp_count)
+    if src_obj.tg_type == 'stc':
+        result = src_obj.tg_emulation_ping(handle=dev_handle, host=dst_ip, count=ping_count)
+        st.log("ping output: {}".format(result))
+        return True if int(result['tx']) == ping_count and int(result['rx']) == exp_count else False
+    elif src_obj.tg_type in ['ixia', 'scapy']:
+        count = 0
+        for _ in range(ping_count):
+            result = src_obj.tg_interface_config(protocol_handle=dev_handle, send_ping='1', ping_dst=dst_ip)
+            st.log("ping output: {}".format(result))
+            if "ping_details" not in list(result.values())[1]:
+                st.warn("ping_details details not found in o/p")
+            elif 'No sessions were started' in list(result.values())[1]:
+                src_obj.get_session_errors()
+                st.warn("ping failed: {}".format(list(result.values())[1]['ping_details']))
+                return False
+            else:
+                try:
+                    result = list(result.values())[1]['ping_details']
+                    if src_obj.tg_type == 'scapy':
+                        ping_out = re.search(r'([0-9]+)\s+packets transmitted,\s+([0-9]+)\s+received', result)
+                    else:
+                        ping_out = re.search(r'([0-9]+)\s+requests sent,\s+([0-9]+)\s+replies received', result)
+                    tx_pkt, rx_pkt = ping_out.group(1), ping_out.group(2)
+                    if int(tx_pkt) == int(rx_pkt):
+                        count += 1
+                except AttributeError:
+                    st.warn("ping command o/p not matching regular expression")
+        return True if count >= exp_count else False
+    else:
+        st.error("Need to add code for this tg type: {}".format(src_obj.tg_type))
+        return False

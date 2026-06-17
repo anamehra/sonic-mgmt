@@ -39,6 +39,7 @@ from spytest import st, tgapi, SpyTestDict
 import tests.cisco.tortuga.vxlan.vxlan_utils as vxlan_obj
 import traffic_stream_ixia_api as stream_api
 import qos_test_utils as qos_utils
+import qos_debug_log_utils as qos_debug
 import gamut_qos_utils as gamut_utils
 import vxlan_ecn_base as base
 from vxlan_ecn_base import (
@@ -220,6 +221,7 @@ def run_ecn_xoff_test(congestion_point, test_name, ect=ECN_ECT_10,
         clear_wred_pre_traffic=False,
         save_config_nodes=['leaf0', 'leaf1', 'spine0'],
         skip_pfc_xoff_stream=skip_pfc_xoff_stream,
+        npu_debug_hook=qos_debug.dump_npu_debug_state,
     )
 
 
@@ -362,7 +364,7 @@ def module_setup():
     # Remove any leftover VRF BGP instances (must be after QoS init which restarts FRR)
     qos_utils.cleanup_leftover_vrf_bgp(nodes)
 
-    st.banner("STEP 6: Generate L2VNI VXLAN/BGP configuration")
+    st.banner("STEP 6: Generate L3VNI VXLAN/BGP configuration")
     updated_config_file = vxlan_obj.modify_config_file(CONFIGS_FILE, vars)
 
     with open(updated_config_file) as c:
@@ -810,6 +812,7 @@ def test_ecn_l3vni_ect10_ingress_leaf_egress_no_pfc_2to1():
             save_config_nodes=['leaf0', 'leaf1', 'spine0'],
             skip_pfc_xoff_stream=True,
             stream_setup_fn=base.setup_tgen_interfaces_and_streams_2to1,
+            npu_debug_hook=qos_debug.dump_npu_debug_state,
         )
     finally:
         if topo_patched:

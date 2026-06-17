@@ -44,7 +44,7 @@ def setup_topo():
                                      "D3T1:4", "D4T1:4")
     vars = st.get_testbed_vars()
 
-    # Reload QoS config and set TC-to-PG map on all DUTs
+    # Reload QoS config and set TC-to-PG map on all DUTs (incl. spines).
     for dut in st.get_dut_names():
         stream_api.init_qos_on_dut(dut)
     st.wait(5)

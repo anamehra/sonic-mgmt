@@ -371,7 +371,8 @@ def run_ecn_xoff_test(data, congestion_point, test_name,
                       clear_wred_pre_traffic=True,
                       save_config_nodes=None,
                       skip_pfc_xoff_stream=False,
-                      stream_setup_fn=None):
+                      stream_setup_fn=None,
+                      npu_debug_hook=None):
     """Run one ECN-over-XOFF iteration.
 
     See module-level comment block for the hook/flag contract.
@@ -549,6 +550,14 @@ def run_ecn_xoff_test(data, congestion_point, test_name,
         for dut in st.get_dut_names():
             qos_utils.clear_all_counters(dut)
 
+        # Optional NPU debug state dump (laguna/carib) BEFORE traffic.
+        # Captures the cleared baseline of internal NPU state.
+        if npu_debug_hook is not None:
+            try:
+                npu_debug_hook(nodes, "PRE-TRAFFIC")
+            except Exception as ne:
+                st.log(f"npu_debug_hook PRE-TRAFFIC failed (non-fatal): {ne}")
+
         # Step 5: Optionally clear and then capture WRED/ECN counters BEFORE traffic
         if clear_wred_pre_traffic:
             st.banner("Clearing WRED/ECN counters on all nodes")
@@ -678,6 +687,15 @@ def run_ecn_xoff_test(data, congestion_point, test_name,
             watermarks=watermarks, pfc_info=pfc_info
         )
         bundle['wred_summary'] = wred_summary or {}
+
+        # Optional NPU debug state dump (laguna/carib) AFTER traffic.
+        # Done after WRED/queue/PFC reads so it doesn't perturb counter
+        # collection above.
+        if npu_debug_hook is not None:
+            try:
+                npu_debug_hook(nodes, "POST-TRAFFIC")
+            except Exception as ne:
+                st.log(f"npu_debug_hook POST-TRAFFIC failed (non-fatal): {ne}")
         bundle['snapshot_summary'] = snapshot_summary or {}
         bundle['pfc_info'] = pfc_info
         # Snapshot of per-port speeds (Gbps) from data.topology so validators

@@ -35,6 +35,7 @@ from spytest import st, tgapi, SpyTestDict
 import tests.cisco.tortuga.vxlan.vxlan_utils as vxlan_obj
 import traffic_stream_ixia_api as stream_api
 import qos_test_utils as qos_utils
+import qos_debug_log_utils as qos_debug
 import gamut_qos_utils as gamut_utils
 import vxlan_ecn_base as base
 from vxlan_ecn_base import (
@@ -112,6 +113,7 @@ def run_ecn_xoff_test(congestion_point, test_name, ect=ECN_ECT_10,
         vtep_ips=(LEAF0_VTEP_IP, LEAF1_VTEP_IP),
         diagnostics_hook=dump_l2vni_diagnostics,
         skip_pfc_xoff_stream=skip_pfc_xoff_stream,
+        npu_debug_hook=qos_debug.dump_npu_debug_state,
     )
 
 
