@@ -16,7 +16,7 @@ def setup_topo():
     global tb_dict, node, frame_sizes, result_file
 
     # Read from input json2 — defaults to D2
-    test_info = qos_test_utils.get_qos_test_dict('../ebay/l1_overhead_input.json2',
+    test_info = qos_test_utils.get_qos_test_dict('../ebay/input_v4_l1_overhead_1node.json2',
                                                   'L1_OVERHEAD_TEST')
     if test_info is None:
         st.report_fail('msg',
@@ -38,8 +38,8 @@ def setup_topo():
     tb_dict = st.ensure_min_topology(f"{node}T1:2")
 
     for dut in st.get_dut_names():
-        stream_api.init_qos_on_dut(dut, [])
         qos_test_utils.cleanup_config(dut)
+        stream_api.init_qos_on_dut(dut, [])
 
     # Simple 1-node config: IPs on both tgen-facing ports
     dut_handle = getattr(tb_dict, node)

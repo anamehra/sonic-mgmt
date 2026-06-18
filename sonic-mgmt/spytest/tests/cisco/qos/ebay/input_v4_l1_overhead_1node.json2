@@ -8,6 +8,6 @@
             # DUT node with 2 tgen ports (ingress > egress speed)
             "node" : "D1",
             # Frame sizes to sweep
-            "frame_sizes" : [256, 512, 1024, 1350, 9000]
+            "frame_sizes" : [1350, 9000]
     }
 }

@@ -1,6 +1,7 @@
 import time
 import os
 import sys
+import random
 import pytest
 import json
 import traffic_stream_ixia_api as stream_api
@@ -9,45 +10,71 @@ from spytest import st, tgapi, SpyTestDict
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_topo():
-    global tb_dict
-    global vars
-    global frame_sizes
+    global tb_dict, vars, frame_sizes
+    global node, dut, ingress_port, egress_port
+    global run_time
 
     st.log("Setup topology started - HBM 1-node oversubscription test")
-    test_info = qos_test_utils.get_qos_test_dict('../ebay/hbm_1node_input.json2',
+
+    # Find the HBM node
+    node = find_hbm_node()
+    if node is None:
+        st.report_unsupported('msg', 'No DUT with HBM found in testbed')
+        return
+
+    # Reserve 2 TG ports on the HBM node
+    tb_dict = st.ensure_min_topology(f"{node}T1:2")
+    vars = st.get_testbed_vars()
+    test_info = qos_test_utils.get_qos_test_dict('../ebay/input_v4_hbm_1node.json2',
                                                   'HBM_TEST')
     if test_info is None:
-        st.report_fail('msg', 'Failed to read ebay/hbm_1node_input.json2')
+        st.report_fail('msg', 'Failed to read ebay/input_v4_hbm_1node.json2')
         return
 
     frame_sizes = test_info.get('frame_sizes')
+    run_time = test_info.get('run_time', 30)
 
     # Set result file to logs directory
     global result_file
     logs_dir = st.get_logs_path()
-    if logs_dir:
-        result_file = os.path.join(logs_dir, 'hbm_result.txt')
-    else:
-        result_file = '/tmp/hbm_result.txt'
-
-    # Clear result file at start of run
+    result_file = os.path.join(logs_dir, 'hbm_result.txt') if logs_dir else '/tmp/hbm_result.txt'
     with open(result_file, 'w') as f:
         f.write('')
 
-    # 1-node topology: D1 has 2 tgen connections
-    # T1D1P1 (400G) -> DUT -> T1D1P2 (100G) = 4:1 oversub at D1 egress
-    tb_dict = st.ensure_min_topology("D1T1:2")
-    vars = st.get_testbed_vars()
-    stream_api.init_qos_on_dut(vars.D1)
-    # Cleanup existing IP config
-    qos_test_utils.cleanup_config(vars.D1)
+    dut = getattr(vars, node)
+    ingress_port = getattr(vars, f'{node}T1P1')
+    egress_port = getattr(vars, f'{node}T1P2')
+    qos_test_utils.cleanup_config(dut)
+    stream_api.init_qos_on_dut(dut)
 
-    # Configure 1-node topology (IPs, routes)
-    stream_api.config_one_leaf(tb_dict, {'dut' : vars.D1, 'leaf' : 'D1'})
+    stream_api.config_one_leaf(tb_dict, {'dut': dut, 'leaf': node})
     st.log("Setup topology done")
 
     yield
     stream_api.release_all_ports()
+
+
+def find_hbm_node():
+    """Probe all DUTs in testbed and return the node index (e.g. 'D1') that has HBM.
+
+    Checks 'show platform npu global' for 'HBM Absent'. If absent is NOT reported,
+    the node is considered to have HBM.
+    Returns None if no DUT has HBM.
+    """
+    tb_vars = st.get_testbed_vars()
+    num_duts = len(st.get_dut_names())
+    for i in range(1, num_duts + 1):
+        dut_name = f'D{i}'
+        dut_handle = getattr(tb_vars, dut_name, None)
+        if dut_handle is None:
+            continue
+        output = st.show(dut_handle, "show platform npu global", skip_tmpl=True)
+        if 'HBM Absent' in output:
+            st.log(f"{dut_name}: HBM Absent - skipping")
+            continue
+        st.log(f"{dut_name}: HBM present")
+        return dut_name
+    return None
 
 def get_hbm_bytes(dut):
     """Get total HBM queue size in bytes using JSON output.
@@ -70,67 +97,17 @@ def get_hbm_bytes(dut):
     return 0
 
 
-def get_intf_counters(dut, interfaces):
-    """Get RX_OK, TX_OK, RX_DRP, TX_DRP for given interfaces.
 
-    Uses split() on each line — BPS fields always produce 2 tokens (value + unit),
-    so data lines always have 16 tokens with fixed positions:
-      [0]=IFACE [2]=RX_OK [7]=RX_DRP [9]=TX_OK [14]=TX_DRP
-
-    Returns: { 'Ethernet80': {'RX_OK': 123, 'TX_OK': 456, 'RX_DRP': 0, 'TX_DRP': 0}, ... }
-    """
-    intf_pattern = "|".join(interfaces)
-    cmd = f"show interfaces counters | egrep 'TX_DRP|{intf_pattern}'"
-    output = st.show(dut, cmd, skip_tmpl=True)
-    result = {}
-    for line in output.strip().splitlines():
-        parts = line.split()
-        if len(parts) >= 16 and parts[0].startswith('Ethernet'):
-            result[parts[0]] = {
-                'RX_OK': int(parts[2].replace(',', '')),
-                'TX_OK': int(parts[9].replace(',', '')),
-                'RX_DRP': int(parts[7].replace(',', '')),
-                'TX_DRP': int(parts[14].replace(',', '')),
-            }
-    return result
-
-
-# Module-level state for tracking counter deltas across show_hbm_status calls
-_prev_counters = {}
-
-
-def show_hbm_status(dut, label="", interfaces=None):
-    """Show HBM VOQ status and interface counters with deltas from previous call.
-
-    Returns HBM total bytes.
-    """
-    global _prev_counters
-    st.log(f"=== HBM Status on {dut} {label} ===")
+def show_hbm_status(dut, label=""):
+    """Log HBM VOQ status. Returns HBM total bytes."""
     hbm_bytes = get_hbm_bytes(dut)
-    st.log(f"HBM total bytes: {hbm_bytes} ({hbm_bytes/1e6:.1f} MB)")
-
-    if interfaces:
-        current = get_intf_counters(dut, interfaces)
-        st.log(f"Interface counters: {current}")
-
-        delta_keys = ['RX_OK', 'TX_OK', 'RX_DRP', 'TX_DRP']
-        if _prev_counters and current:
-            st.log(f"--- Counter deltas since last check ({label}) ---")
-            for intf in current:
-                if intf not in _prev_counters:
-                    continue
-                parts = []
-                for key in delta_keys:
-                    delta = current[intf][key] - _prev_counters.get(intf, {}).get(key, 0)
-                    parts.append(f"{key}=+{delta}")
-                st.log(f"  {intf}: {'  '.join(parts)}")
-        _prev_counters = current
+    st.log(f"HBM {label}: {hbm_bytes} ({hbm_bytes/1e6:.1f} MB)")
     return hbm_bytes
 
 
-# ── default traffic configuration ──
-RUN_TIME = 10       # seconds to run traffic at each rate step
-result_file = '/tmp/hbm_result.txt'  # default; updated in setup
+# ── defaults (overridden from json2 in setup) ──
+run_time = 10
+result_file = '/tmp/hbm_result.txt'
 
 def rlog(msg):
     """Write a line to the result file and also st.log it."""
@@ -178,51 +155,58 @@ def do_hbm_rate_sweep_1node(stream, egress_speed, frame_size):
     rlog(f"Rates: {rates_gbps}")
     rlog('')
 
-    intf_list = [vars.D1T1P1, vars.D1T1P2]
     hbm_results = {}
     queue_results = {}
     pass_fail = {}
 
     for gbps in rates_gbps:
-        st.banner(f"Frame={frame_size} | {gbps}Gbps into {egress_speed}G egress for {RUN_TIME}s")
+        st.banner(f"Frame={frame_size} | {gbps}Gbps into {egress_speed}G egress for {run_time}s")
         stream_api.modify_stream_rate(stream, gbps, frame_size)
 
         # Clear tgen stats so loss_pct reflects only this iteration
         stream_api.clear_all_stats()
 
-        qc_before = qos_test_utils.get_tc_queue_counters_json(vars.D1, vars.D1T1P2, 0)
-        show_hbm_status(vars.D1, f"[{frame_size}B][{gbps}G] BEFORE START", intf_list)
+        qc_before = qos_test_utils.get_tc_queue_counters_json(dut, egress_port, 0)
+        show_hbm_status(dut, f"[{frame_size}B][{gbps}G] BEFORE START")
         stream_api.start_traffic_stream(stream)
 
-        # Take 3 snapshots of HBM occupancy and compute average
-        hbm_bytes = 0
-        for i in range(3):
-            st.wait(RUN_TIME)
-            hbm_bytes += show_hbm_status(vars.D1, f"[{frame_size}B][{gbps}G] DURING (traffic on)")
-        hbm_results[gbps] = int(hbm_bytes / 3)
+        # Snapshot HBM occupancy every 5 seconds for run_time and compute average
+        hbm_samples = []
+        num_samples = run_time // 5
+        for i in range(num_samples):
+            st.wait(5)
+            sample = show_hbm_status(dut, f"[{frame_size}B][{gbps}G] sample {i+1}/{num_samples}")
+            hbm_samples.append(sample)
+        hbm_results[gbps] = int(sum(hbm_samples) / len(hbm_samples)) if hbm_samples else 0
 
         # Snapshot tgen stats while traffic is still running
         live_stats = stream_api.collect_traffic_stream_stats()
         tx_rate_bps = 0
         rx_rate_bps = 0
+        rx_l1_rate_bps = 0
+        rx_pps = 0
         if 'traffic_item' in live_stats and stream['stream_id'] in live_stats['traffic_item']:
             s_info = live_stats['traffic_item'][stream['stream_id']]
             tx_info = s_info.get('tx', {})
             rx_info = s_info.get('rx', {})
             tx_rate_bps = int(float(tx_info.get('total_pkt_bit_rate', tx_info.get('rate_bps', 0))))
             rx_rate_bps = int(float(rx_info.get('total_pkt_bit_rate', rx_info.get('rate_bps', 0))))
+            rx_l1_rate_bps = int(float(rx_info.get('l1_bit_rate', 0)))
+            rx_pps = int(float(rx_info.get('total_pkt_rate', 0)))
         stream_api.log_stream_stats(live_stats, stream['stream_id'])
 
         stream_api.stop_traffic_stream(stream)
-        show_hbm_status(vars.D1, f"[{frame_size}B][{gbps}G] AFTER STOP", intf_list)
-        qc_after = qos_test_utils.get_tc_queue_counters_json(vars.D1, vars.D1T1P2, 0)
+        show_hbm_status(dut, f"[{frame_size}B][{gbps}G] AFTER STOP")
+        qc_after = qos_test_utils.get_tc_queue_counters_json(dut, egress_port, 0)
 
         # Queue counter deltas
         d_drop = qc_after['droppacket'] - qc_before['droppacket']
         tx_gbps = tx_rate_bps / 1e9
         rx_gbps = rx_rate_bps / 1e9
         hbm_mb = hbm_results[gbps] / 1e6
-        queue_results[gbps] = {'drop': d_drop, 'tx_gbps': tx_gbps, 'rx_gbps': rx_gbps}
+        rx_l1_gbps = rx_l1_rate_bps / 1e9
+        queue_results[gbps] = {'drop': d_drop, 'tx_gbps': tx_gbps, 'rx_gbps': rx_gbps,
+                               'rx_pps': rx_pps, 'rx_l1_gbps': rx_l1_gbps}
         checks = []
 
         # Pass/fail validation
@@ -245,12 +229,13 @@ def do_hbm_rate_sweep_1node(stream, egress_speed, frame_size):
             pass_fail[gbps] = "PASS" if not checks else f"FAIL: {'; '.join(checks)}"
 
     # Print summary table
-    rlog(f"{'TxRate':>8} {'RxRate':>8} {'HBM MB':>8} {'Drops':>12} {'Result'}")
-    rlog(f"{'-'*8} {'-'*8} {'-'*8} {'-'*12} {'-'*30}")
+    rlog(f"{'TxRate':>8} {'RxRate':>8} {'RxPPS':>12} {'RxL1':>8} {'HBM MB':>8} {'Drops':>12} {'Result'}")
+    rlog(f"{'-'*8} {'-'*8} {'-'*12} {'-'*8} {'-'*8} {'-'*12} {'-'*30}")
     for rate in rates_gbps:
         q = queue_results.get(rate, {})
         hbm_mb = hbm_results.get(rate, 0) / 1e6
         rlog(f"{q.get('tx_gbps',0):>7.1f}G {q.get('rx_gbps',0):>7.1f}G "
+             f"{q.get('rx_pps',0):>12,.0f} {q.get('rx_l1_gbps',0):>7.1f}G "
              f"{hbm_mb:>7.1f}  {q.get('drop',0):>12,} {pass_fail.get(rate, '?')}")
     rlog('')
 
@@ -260,17 +245,20 @@ def do_hbm_rate_sweep_1node(stream, egress_speed, frame_size):
 
 
 def test_hbm_rate_sweep_1node():
-    egress_speed = qos_test_utils.get_if_speed(vars.D1, vars.D1T1P2)
+    egress_speed = qos_test_utils.get_if_speed(dut, egress_port)
 
     # Create stream once with TC=0 at a placeholder rate
     pps = stream_api.gbps_to_pps(50, 1350)
     stream = stream_api.create_traffic_stream(
-        tb_dict, 'T1D1P1', 'T1D1P2', 1350, pps, 0)
+        tb_dict, f'T1{node}P1', f'T1{node}P2', 1350, pps, 0)
     if stream is None:
         st.report_fail('msg', 'Failed to create traffic stream')
 
     all_failures = []
-    for frame_size in frame_sizes:
+    shuffled_sizes = list(frame_sizes)
+    random.shuffle(shuffled_sizes)
+    rlog(f"Randomized frame size order: {shuffled_sizes}")
+    for frame_size in shuffled_sizes:
         rlog(f"\n{'='*60}")
         rlog(f"FRAME SIZE {frame_size}")
         rlog(f"{'='*60}")

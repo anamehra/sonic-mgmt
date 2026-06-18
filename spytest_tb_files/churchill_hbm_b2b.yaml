@@ -18,6 +18,11 @@ devices:
         access: {protocol: ssh, ip: 1.74.23.32, port: 22}
         credentials: {username: admin, password: password, altpassword: YourPaSsWoRd}
         properties: {config: default, build: default, services: default, params: def_dut, speed: default}
+    cmono1:
+        device_type: DevSonic
+        access: {protocol: ssh, ip: 1.74.23.223, port: 22}
+        credentials: {username: admin, password: password, altpassword: YourPaSsWoRd}
+        properties: {config: default, build: default, services: default, params: def_dut, speed: default}
     stc:
        device_type: TGEN
        properties: {type: stc, version: 5.45, ip: 172.27.147.23}
@@ -27,3 +32,7 @@ topology:
         interfaces:
             Ethernet120: {EndDevice: stc, EndPort: 11/9, params: def_tg_link} # 400G port
             Ethernet80: {EndDevice: stc, EndPort: 3/25, params: def_tg_link} # 100G port
+    cmono1:
+        interfaces:
+            Ethernet96: {EndDevice: cmono_hbm, EndPort: Ethernet96, params: def_link}
+            Ethernet120: {EndDevice: stc, EndPort: 11/1, params: def_tg_link} # 400G port

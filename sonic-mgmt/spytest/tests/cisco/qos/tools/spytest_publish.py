@@ -410,7 +410,7 @@ def print_test_execution_summary(tests):
         if result in ['Fail', 'ConfigFail', 'TGenFail', 'ScriptError']:
             desc = t['description'][:100]  # Truncate long descriptions
             if desc and desc != 'No description':
-                print(f"         └─ {desc}")
+                print(f"         \-- {desc}")
     
     print(f"{'='*70}")
 
@@ -644,7 +644,7 @@ def main():
         'SPECTRUM4': 'spectrum4',
     }
     
-    # ── Resolve profile, platform, fabric from testbed YAML ──
+    # -- Resolve profile, platform, fabric from testbed YAML --
     tb_config = get_testbed_config(args.yaml)
     if not tb_config:
         print(f"Error: Unknown testbed YAML '{args.yaml}'")
@@ -851,7 +851,7 @@ def main():
             if not ssh_mkdir(remote_logs_dir, password):
                 print("  Warning: Failed to create remote directory")
             if scp_upload(local_xml, remote_xml_path, password):
-                print(f"  ✓ XML uploaded to {remote_xml_path}")
+                print(f"  [OK] XML uploaded to {remote_xml_path}")
             else:
                 print("  Error: Failed to upload XML")
     

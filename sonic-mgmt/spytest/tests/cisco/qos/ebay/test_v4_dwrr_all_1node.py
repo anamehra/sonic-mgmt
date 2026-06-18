@@ -17,6 +17,7 @@ import sys
 import pytest
 import traffic_stream_ixia_api as stream_api
 import qos_test_utils
+import ebay_utils
 from spytest import st, tgapi, SpyTestDict
 
 @pytest.fixture(scope="module", autouse=True)
@@ -25,30 +26,43 @@ def setup_topo():
     global vars
     global test_info
     global weights, traffic_classes, ingress_speed_gbps, egress_speed_gbps, frame_size, run_time
+    global node, dut, ingress_port, egress_port
 
     st.log("Setup topology started - DWRR all-scenarios 1-node test")
 
-    test_info = qos_test_utils.get_qos_test_dict('../ebay/dwrr_1node_input.json2',
+
+    test_info = qos_test_utils.get_qos_test_dict('../ebay/input_v4_dwrr_all_1node.json2',
                                                  'DWRR_TEST')
     if test_info is None:
-        st.report_fail('msg', 'Failed to read ebay/dwrr_1node_input.json2')
+        st.report_fail('msg', 'Failed to read ebay/input_v4_dwrr_all_1node.json2')
         return
 
     # Populate globals from input json
     frame_size = int(test_info.get('frame_sizes')[0])
     run_time = test_info.get('run_time')
+    node = test_info.get('leaf', 'D1')
 
-    # 1-node topology: T1D1P1 (400G) -> DUT -> T1D1P2 (100G)
-    tb_dict = st.ensure_min_topology("D1T1:2")
+    # 2-node b2b testbed: use the node specified in input json2
+    tb_dict = st.ensure_min_topology(f"{node}T1:2")
     vars = st.get_testbed_vars()
-    ingress_speed_gbps = qos_test_utils.get_if_speed(vars.D1, vars.D1T1P1)
-    egress_speed_gbps = qos_test_utils.get_if_speed(vars.D1, vars.D1T1P2)
-    stream_api.init_qos_on_dut(vars.D1)
-    qos_test_utils.cleanup_config(vars.D1)
-    stream_api.config_one_leaf(tb_dict, {'dut' : vars.D1, 'leaf' : 'D1'})
+    dut = getattr(vars, node)
+
+    # Platform gate: only supported on 8201-32FH
+    if not ebay_utils.check_platform_supported(dut):
+        st.report_unsupported('msg', 'Platform is not Cisco-8201-32FH-O, skipping DWRR test')
+        return
+
+    ingress_port = getattr(vars, f'{node}T1P1')
+    egress_port = getattr(vars, f'{node}T1P2')
+    ingress_speed_gbps = qos_test_utils.get_if_speed(dut, ingress_port)
+    egress_speed_gbps = qos_test_utils.get_if_speed(dut, egress_port)
+
+    qos_test_utils.cleanup_config(dut)
+    stream_api.init_qos_on_dut(dut)
+    stream_api.config_one_leaf(tb_dict, {'dut' : dut, 'leaf' : node})
 
     # Read DWRR weights from ConfigDB SCHEDULER table on egress DUT
-    config = qos_test_utils.get_config_db(vars.D1)
+    config = qos_test_utils.get_config_db(dut)
     scheduler_table = config.get("SCHEDULER", {})
     weights = {}
     for key, entry in scheduler_table.items():
@@ -111,22 +125,22 @@ def run_tc_pair_test(tc_pair, frame_size, run_time):
 
     pps = stream_api.gbps_to_pps(stream_rate, frame_size)
     str1 = stream_api.create_traffic_stream(
-        tb_dict, 'T1D1P1', 'T1D1P2', frame_size, pps, tc1)
+        tb_dict, f'T1{node}P1', f'T1{node}P2', frame_size, pps, tc1)
     if str1 is None:
         rlog(f"FAIL: Could not create stream for TC{tc1}")
         return False
 
     str2 = stream_api.create_traffic_stream(
-        tb_dict, 'T1D1P1', 'T1D1P2', frame_size, pps, tc2)
+        tb_dict, f'T1{node}P1', f'T1{node}P2', frame_size, pps, tc2)
     if str2 is None:
         stream_api.delete_traffic_stream(str1)
         rlog(f"FAIL: Could not create stream for TC{tc2}")
         return False
 
     # Run traffic
-    egress_intf = tb_dict['D1T1P2']
-    qc1_before = qos_test_utils.get_tc_queue_counters_json(vars.D1, egress_intf, tc1)
-    qc2_before = qos_test_utils.get_tc_queue_counters_json(vars.D1, egress_intf, tc2)
+    egress_intf = egress_port
+    qc1_before = qos_test_utils.get_tc_queue_counters_json(dut, egress_intf, tc1)
+    qc2_before = qos_test_utils.get_tc_queue_counters_json(dut, egress_intf, tc2)
 
     stream_api.start_traffic_stream()
     st.wait(run_time)
@@ -140,8 +154,8 @@ def run_tc_pair_test(tc_pair, frame_size, run_time):
     # Snapshot after stop — for final cumulative totals (should match queue counters)
     stats_final = stream_api.collect_traffic_stream_stats()
 
-    qc1_after = qos_test_utils.get_tc_queue_counters_json(vars.D1, egress_intf, tc1)
-    qc2_after = qos_test_utils.get_tc_queue_counters_json(vars.D1, egress_intf, tc2)
+    qc1_after = qos_test_utils.get_tc_queue_counters_json(dut, egress_intf, tc1)
+    qc2_after = qos_test_utils.get_tc_queue_counters_json(dut, egress_intf, tc2)
 
     qc_bytes1 = qc1_after['totalbytes'] - qc1_before['totalbytes']
     qc_bytes2 = qc2_after['totalbytes'] - qc2_before['totalbytes']
@@ -262,14 +276,14 @@ def test_dwrr_overload_all():
     for tc in traffic_classes:
         pps = stream_api.gbps_to_pps(rates[tc], frame_size)
         stream = stream_api.create_traffic_stream(
-            tb_dict, 'T1D1P1', 'T1D1P2', frame_size, pps, tc)
+            tb_dict, f'T1{node}P1', f'T1{node}P2', frame_size, pps, tc)
         if stream is None:
             st.report_fail('msg', f'Failed to create stream for TC={tc}')
         streams[tc] = stream
 
     # Queue counters before
-    egress_intf = tb_dict['D1T1P2']
-    qc_before = qos_test_utils.get_all_tc_queue_counters_json(vars.D1, egress_intf, traffic_classes)
+    egress_intf = egress_port
+    qc_before = qos_test_utils.get_all_tc_queue_counters_json(dut, egress_intf, traffic_classes)
 
     # Run
     stream_api.start_traffic_stream()
@@ -286,7 +300,7 @@ def test_dwrr_overload_all():
 
     # Queue counters after
     qc_after = qos_test_utils.get_all_tc_queue_counters_json(
-                   vars.D1,
+                   dut,
                    egress_intf,
                    traffic_classes)
 
@@ -385,7 +399,7 @@ def test_dwrr_overload_one():
     aberrant_tc = 1
     aberrant_rate = 5.0  # 5G (5% of 100G, > its 3% weight)
     rate_pcts = [98.5, 99, 99.5, 100]
-    egress_intf = tb_dict['D1T1P2']
+    egress_intf = egress_port
     max_l2 = egress_speed_gbps * frame_size / (frame_size + 20)
 
     overall_passed = True
@@ -395,7 +409,7 @@ def test_dwrr_overload_one():
     initial_pps = stream_api.gbps_to_pps(1.0, frame_size)  # placeholder
     for tc in traffic_classes:
         stream = stream_api.create_traffic_stream(
-            tb_dict, 'T1D1P1', 'T1D1P2', frame_size, initial_pps, tc)
+            tb_dict, f'T1{node}P1', f'T1{node}P2', frame_size, initial_pps, tc)
         if stream is None:
             st.report_fail('msg', f'Failed to create stream for TC={tc}')
         streams[tc] = stream
@@ -428,7 +442,7 @@ def test_dwrr_overload_one():
 
         # Queue counters before
         qc_before = qos_test_utils.get_all_tc_queue_counters_json(
-                        vars.D1, egress_intf, traffic_classes)
+                        dut, egress_intf, traffic_classes)
 
         # Run
         stream_api.start_traffic_stream()
@@ -444,7 +458,7 @@ def test_dwrr_overload_one():
         stats_final = stream_api.collect_traffic_stream_stats()
 
         # Queue counters after
-        qc_after = qos_test_utils.get_all_tc_queue_counters_json(vars.D1, egress_intf, traffic_classes)
+        qc_after = qos_test_utils.get_all_tc_queue_counters_json(dut, egress_intf, traffic_classes)
 
         # Extract tgen stats
         results = {}

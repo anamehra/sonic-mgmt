@@ -47,10 +47,10 @@ def print_test_list(tests, failures_only=False):
         if result in ['Fail', 'ConfigFail', 'TGenFail']:
             desc = t['description'][:100]
             if desc and desc != 'No description':
-                print(f"         └─ {desc}")
+                print(f"         \-- {desc}")
     
     if failures_only and shown == 0:
-        print("  No failures! 🎉")
+        print("  No failures! [DONE]")
     
     print(f"{'='*70}")
 

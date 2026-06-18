@@ -29,7 +29,7 @@ from testbed_config import TESTBED_IDS, ADMIN_PASSWORD
 
 DEFAULT_LOCK_HOURS = 15  # safety ceiling for programmatic callers
 
-# ── Server config (read from testbed_config or environment) ──
+# -- Server config (read from testbed_config or environment) --
 _SERVER_HOST = os.environ.get("TESTBED_LOCK_HOST", "sonic-ucs-m6-51")
 _SERVER_USER = os.environ.get("TESTBED_LOCK_USER", "sonic")
 _SERVER_PASS = os.environ.get("TESTBED_LOCK_PASS", "")
@@ -78,7 +78,7 @@ def _decode(data):
 def _eastern_now():
     """Return current time in US Eastern (auto-detects EDT/EST)."""
     utc = datetime.utcnow()
-    # US Eastern: EDT = UTC-4 (Mar second Sun – Nov first Sun), EST = UTC-5
+    # US Eastern: EDT = UTC-4 (Mar second Sun -- Nov first Sun), EST = UTC-5
     mar1 = datetime(utc.year, 3, 1)
     dst_start = mar1 + timedelta(days=(6 - mar1.weekday()) % 7 + 7)  # 2nd Sunday
     nov1 = datetime(utc.year, 11, 1)
@@ -157,9 +157,9 @@ def get_lock_info(yaml_name):
         try:
             exp_time = datetime.strptime(expires, "%Y-%m-%d %H:%M:%S")
             if datetime.utcnow() > exp_time:
-                return None  # Expired — treat as unlocked
+                return None  # Expired -- treat as unlocked
         except ValueError:
-            pass  # Malformed expires — treat as no expiry
+            pass  # Malformed expires -- treat as no expiry
 
     return info
 
@@ -195,7 +195,7 @@ def acquire_lock(yaml_name, note="", force=False, hours=None):
         since = current.get("since", "?")
         lock_host = current.get("host", "?")
 
-        # Already locked by me — cancel old expiry timer, then renew
+        # Already locked by me -- cancel old expiry timer, then renew
         if owner == me:
             _cancel_expiry(current.get("at_job"))
         elif not force:
@@ -208,7 +208,7 @@ def acquire_lock(yaml_name, note="", force=False, hours=None):
             # Force-acquire: cancel previous owner's timer
             _cancel_expiry(current.get("at_job"))
     else:
-        # Lock is expired or absent — cancel any lingering at job from the
+        # Lock is expired or absent -- cancel any lingering at job from the
         # previous owner's reservation (the file may still exist on disk even
         # though get_lock_info treats it as expired).
         raw = _read_raw_lock(yaml_name)
@@ -274,7 +274,7 @@ def _list_all():
         return []
     locks = []
     for path in out.split("\n"):
-        # Filename is .gamut_2x2_qos.yaml.dat → strip leading dot and .dat
+        # Filename is .gamut_2x2_qos.yaml.dat -> strip leading dot and .dat
         fname = os.path.basename(path)
         name = fname[1:].replace(".dat", "")  # remove leading '.' and trailing '.dat'
         info = get_lock_info(name)
@@ -283,7 +283,7 @@ def _list_all():
     return locks
 
 
-# ── Public API for other scripts ──
+# -- Public API for other scripts --
 
 def check_lock(yaml_name):
     """Check if the current user holds the reservation.
@@ -304,7 +304,7 @@ def check_lock(yaml_name):
         host = current.get("host", "?")
         expires = current.get("expires", "?")
         note = current.get("note", "")
-        print(f"  TESTBED RESERVED by {owner}@{host} (expires {expires}) — {note}",
+        print(f"  TESTBED RESERVED by {owner}@{host} (expires {expires}) -- {note}",
               file=sys.stderr)
         return False
 
@@ -465,7 +465,7 @@ def main():
         ok = check_lock(yaml_name)
         sys.exit(0 if ok else 1)
 
-    # No action specified → show all testbed status
+    # No action specified -> show all testbed status
     if args.reserve is None and not args.release:
         _show_all_status()
         return

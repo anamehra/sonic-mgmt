@@ -3,6 +3,7 @@
 # Rates are computed dynamically from port speeds
 {
     "HBM_TEST" : {
-            "frame_sizes" : [64, 512, 1024, 1350, 3072, 5120, 6144, 7168, 7900, 8192, 8200, 8400, 8800, 9000]
+            "frame_sizes" : [64, 512, 1350, 3072, 4000, 5120, 6144, 7168, 7900, 8140, 8192, 9000],
+	    "run_time" : 30
     }
 }

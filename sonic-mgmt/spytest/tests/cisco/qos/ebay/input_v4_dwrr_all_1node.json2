@@ -4,6 +4,7 @@
 # No scheduler CLI changes needed - just verify existing config behavior
 {
     "DWRR_TEST" : {
+	    "leaf": "D1",
             # TC pairs to test (each pair competes for egress bandwidth)
             "tc_pair" : [["0", "2"], ["0", "3"], ["2", "3"], ["0", "4"], ["1", "7"], ["2", "4"]],
             "frame_sizes" : ["1350"],

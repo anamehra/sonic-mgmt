@@ -3397,13 +3397,6 @@
             "9": "0"
         }
     },
-    "FDB_TABLE": {
-        "Vlan501:00:10:02:00:00:01": {
-            "port": "vtep",
-            "remote_vtep": "10.1.1.2",
-            "type": "static"
-        }
-    },
     "FEATURE": {
         "apm": {
             "auto_restart": "enabled",

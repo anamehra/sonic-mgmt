@@ -44,7 +44,7 @@ import yaml
 from testbed_config import get_config as get_tb_config, discover_repo, find_testbed_yaml, TESTBED_IDS
 from testbed import check_lock
 
-# ── Constants ────────────────────────────────────────────────────────────
+# -- Constants ------------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 UPGRADE_SCRIPT = SCRIPT_DIR / "upgrade_on_dut.sh"
@@ -54,7 +54,7 @@ PUBLISH_SCRIPT = SCRIPT_DIR / "spytest_publish.py"
 BASE_CONFIGS_DIR = SCRIPT_DIR.parent / "dut_configs"
 DEFAULT_LOG_DIR = Path.home() / "spytest" / "logs"
 
-# ── Log server and dashboard (hardcoded for simplicity) ──
+# -- Log server and dashboard (hardcoded for simplicity) --
 import base64 as _b64
 LOG_SERVER = {
     "host": "sonic-ucs-m6-51",
@@ -67,7 +67,7 @@ DASHBOARD_URL = "http://sonic-ucs-m6-51:5005"
 os.environ["TZ"] = "America/New_York"
 time.tzset()
 
-# ── Logging setup ────────────────────────────────────────────────────────
+# -- Logging setup --------------------------------------------------------
 
 class ColorFormatter(logging.Formatter):
     """Color log output when on a TTY, plain when piped/cron."""
@@ -114,7 +114,7 @@ def setup_logging(log_file: Path):
 
 log = logging.getLogger(__name__)
 
-# ── SSH / SCP helpers ────────────────────────────────────────────────────
+# -- SSH / SCP helpers ----------------------------------------------------
 
 SSH_OPTS = [
     "-o", "StrictHostKeyChecking=no",
@@ -164,7 +164,7 @@ def is_host_reachable(host, user, password, retries=3, delay=10):
                 time.sleep(delay)
     return False
 
-# ── Build ID from DUT ────────────────────────────────────────────────────
+# -- Build ID from DUT ----------------------------------------------------
 
 def get_version_info_from_dut(dut):
     """SSH to a DUT and extract branch + build ID from 'show version'.
@@ -198,7 +198,7 @@ def _write_version_info(log_dir, branch, build_id):
     except Exception:
         pass
 
-# ── URL parsing ──────────────────────────────────────────────────────────
+# -- URL parsing ----------------------------------------------------------
 
 def parse_image_url(url):
     """Extract branch and build_id from image URL filename.
@@ -220,7 +220,7 @@ def parse_image_url(url):
 
     return branch, build_id
 
-# ── YAML testbed parsing ─────────────────────────────────────────────────
+# -- YAML testbed parsing -------------------------------------------------
 
 def _include_constructor(loader, node):
     return None
@@ -244,7 +244,7 @@ def parse_duts_from_yaml(yaml_path):
             })
     return duts
 
-# ── Git ──────────────────────────────────────────────────────────────────
+# -- Git ------------------------------------------------------------------
 
 _pulled_repos = set()
 
@@ -290,15 +290,15 @@ def git_pull_repo(repo_dir, branch=None):
         cwd=repo_dir, capture_output=True, text=True, timeout=60,
     )
     if r.returncode == 0:
-        log.info("  ✓ Repo updated (origin/%s)", current_branch)
+        log.info("  [OK] Repo updated (origin/%s)", current_branch)
     else:
-        # ff-only failed (local commits ahead) — that's fine, keep as-is
-        log.info("  Local commits ahead of origin — keeping as-is")
+        # ff-only failed (local commits ahead) -- that's fine, keep as-is
+        log.info("  Local commits ahead of origin -- keeping as-is")
     _pulled_repos.add(repo_str)
 
     return repo_str in _pulled_repos
 
-# ── DUT upgrade ──────────────────────────────────────────────────────────
+# -- DUT upgrade ----------------------------------------------------------
 
 def upgrade_dut(dut, url):
     """SCP upgrade script to DUT and run it (triggers reboot)."""
@@ -311,7 +311,7 @@ def upgrade_dut(dut, url):
         log.error("  SCP failed: %s", r.stderr.strip())
         return False
 
-    # Run upgrade (SSH will disconnect during reboot — that's expected)
+    # Run upgrade (SSH will disconnect during reboot -- that's expected)
     log.info("  Running upgrade on %s (triggers reboot)...", dut["name"])
     try:
         remote_ssh(
@@ -330,16 +330,16 @@ def wait_for_dut(dut, max_wait=600, interval=30):
     elapsed = 0
     polls = 0
     while elapsed < max_wait:
-        # Single attempt per poll — no inner retries during reboot wait
+        # Single attempt per poll -- no inner retries during reboot wait
         if is_host_reachable(dut["ip"], dut["user"], dut["password"], retries=1):
-            log.info("  ✓ %s is back after %ds", dut["name"], elapsed)
+            log.info("  [OK] %s is back after %ds", dut["name"], elapsed)
             return True
         polls += 1
         if polls % 4 == 0:
             log.info("  %s still rebooting (%ds elapsed)...", dut["name"], elapsed)
         time.sleep(interval)
         elapsed += interval
-    log.error("  ✗ %s did not come back within %ds", dut["name"], max_wait)
+    log.error("  [FAIL] %s did not come back within %ds", dut["name"], max_wait)
     return False
 
 
@@ -356,16 +356,16 @@ def wait_for_containers(dut, max_wait=180, interval=10):
             if r.returncode == 0:
                 count = int(r.stdout.strip() or "0")
                 if count >= len(critical_containers):
-                    log.info("    ✓ %s: containers ready (%ds)", dut["name"], elapsed)
+                    log.info("    [OK] %s: containers ready (%ds)", dut["name"], elapsed)
                     return True
         except Exception:
             pass
         time.sleep(interval)
         elapsed += interval
-    log.warning("    ⚠ %s: containers not all up after %ds (continuing)", dut["name"], max_wait)
+    log.warning("    [WARN] %s: containers not all up after %ds (continuing)", dut["name"], max_wait)
     return False
 
-# ── Log transfer ─────────────────────────────────────────────────────────
+# -- Log transfer ---------------------------------------------------------
 
 def transfer_logs(tb, local_log_dir, branch, build_id, log_server, tb_config):
     """SCP run logs to central server.
@@ -390,23 +390,23 @@ def transfer_logs(tb, local_log_dir, branch, build_id, log_server, tb_config):
     r = remote_ssh(srv["host"], srv["user"], srv["password"],
                    f"ls '{base_remote_path}/' 2>/dev/null | head -1", timeout=15)
     if r.returncode == 0 and r.stdout.strip():
-        # Directory exists and has content — find the highest existing runN directory
+        # Directory exists and has content -- find the highest existing runN directory
         r2 = remote_ssh(srv["host"], srv["user"], srv["password"],
                         f"ls -d '{base_remote_path}'/run[0-9]* 2>/dev/null | grep -oP 'run\\K[0-9]+' | sort -n | tail -1",
                         timeout=15)
         if r2.returncode == 0 and r2.stdout.strip().isdigit():
-            # runN directories exist — use next number
+            # runN directories exist -- use next number
             next_run = int(r2.stdout.strip()) + 1
         else:
-            # No runN dirs yet — existing content is implicitly run1, new goes to run2
+            # No runN dirs yet -- existing content is implicitly run1, new goes to run2
             next_run = 2
 
         remote_path = f"{base_remote_path}/run{next_run}"
-        log.info("Build %s already has logs — using %s", build_id, remote_path)
+        log.info("Build %s already has logs -- using %s", build_id, remote_path)
     else:
         remote_path = base_remote_path
 
-    log.info("Transferring logs → %s:%s", srv["host"], remote_path)
+    log.info("Transferring logs -> %s:%s", srv["host"], remote_path)
 
     # Create remote directory
     r = remote_ssh(srv["host"], srv["user"], srv["password"], f"mkdir -p '{remote_path}'", timeout=30)
@@ -432,7 +432,7 @@ def transfer_logs(tb, local_log_dir, branch, build_id, log_server, tb_config):
         log.error("SCP failed: %s", r.stderr.strip())
         return None
 
-    log.info("  ✓ Logs transferred")
+    log.info("  [OK] Logs transferred")
     return remote_path
 
 
@@ -446,9 +446,9 @@ def cleanup_local_logs(local_log_dir):
     if rm.returncode != 0:
         log.warning("  Could not remove local logs (root-owned): %s", local_log_dir)
     else:
-        log.info("  ✓ Local logs removed: %s", local_log_dir)
+        log.info("  [OK] Local logs removed: %s", local_log_dir)
 
-# ── Run one testbed ──────────────────────────────────────────────────────
+# -- Run one testbed ------------------------------------------------------
 
 def run_one_testbed(yaml_file, cfg, tb_config):
     """Run full pipeline for one testbed. Returns (success: bool, duration_min: int).
@@ -492,13 +492,13 @@ def run_one_testbed(yaml_file, cfg, tb_config):
             log.info("  Spine:   %s", os.path.basename(spine_url))
     log.info("=" * 64)
 
-    # ── Testbed reservation check ──
+    # -- Testbed reservation check --
     if not check_lock(yaml_file.name):
         log.error("No valid reservation. Aborting.")
         return False, 0
 
-    # ── Phase 0: Update repo ──
-    log.info("═══ Phase 0: Updating repo ═══")
+    # -- Phase 0: Update repo --
+    log.info("=== Phase 0: Updating repo ===")
     branch = cfg.get("branch", "")
     git_pull_repo(repo_dir, branch=branch if branch else None)
 
@@ -511,7 +511,7 @@ def run_one_testbed(yaml_file, cfg, tb_config):
             cwd=repo_dir, capture_output=True, text=True, timeout=30,
         )
         if r.returncode == 0:
-            log.info("  ✓ Patch applied")
+            log.info("  [OK] Patch applied")
         else:
             log.warning("  Patch apply failed (continuing): %s", r.stderr.strip())
 
@@ -523,7 +523,7 @@ def run_one_testbed(yaml_file, cfg, tb_config):
     for d in duts:
         log.info("  DUT: %s (%s)", d["name"], d["ip"])
 
-    # HACK: On gamut testbed, skip upgrading spine1 (Superbolt) — only upgrade spine0, leaf0, leaf1
+    # HACK: On gamut testbed, skip upgrading spine1 (Superbolt) -- only upgrade spine0, leaf0, leaf1
     if tb_config.get("runner_platform") == "gamut":
         upgrade_duts = [d for d in duts if d["name"] != "spine1"]
         log.info("  [HACK] Gamut: skipping spine1 upgrade. Upgrading: %s",
@@ -531,9 +531,9 @@ def run_one_testbed(yaml_file, cfg, tb_config):
     else:
         upgrade_duts = duts
 
-    # ── Phase 1: Upgrade ──
+    # -- Phase 1: Upgrade --
     if not skip_upgrade:
-        log.info("═══ Phase 1: Upgrading %d DUTs (parallel) ═══", len(upgrade_duts))
+        log.info("=== Phase 1: Upgrading %d DUTs (parallel) ===", len(upgrade_duts))
 
         # Check reachability (parallel)
         def check_reachable(d):
@@ -547,7 +547,7 @@ def run_one_testbed(yaml_file, cfg, tb_config):
                 if not ok:
                     log.error("%s (%s) is unreachable. Skipping %s.", d["name"], d["ip"], tb)
                     return False, int((time.time() - start) / 60)
-                log.info("  ✓ %s reachable", d["name"])
+                log.info("  [OK] %s reachable", d["name"])
 
         # Upgrade all DUTs in parallel
         def do_upgrade(d):
@@ -561,7 +561,7 @@ def run_one_testbed(yaml_file, cfg, tb_config):
             futures = [pool.submit(do_upgrade, d) for d in upgrade_duts]
             for f in as_completed(futures):
                 d = f.result()
-                log.info("  ✓ Upgrade initiated on %s", d["name"])
+                log.info("  [OK] Upgrade initiated on %s", d["name"])
 
         # Wait for all DUTs in parallel
         log.info("Waiting for DUTs to reboot (parallel)...")
@@ -597,15 +597,15 @@ def run_one_testbed(yaml_file, cfg, tb_config):
             for f in as_completed(futures):
                 f.result()  # Just wait, don't fail on warning
     else:
-        log.info("═══ Phase 1: Upgrade SKIPPED ═══")
+        log.info("=== Phase 1: Upgrade SKIPPED ===")
 
-    # ── Phase 1.5: Push base configs ──
+    # -- Phase 1.5: Push base configs --
     skip_config = cfg.get("skip_config", False)
     base_config_dir_name = tb_config.get("base_config_dir", "")
     if not skip_config and base_config_dir_name:
         config_dir = BASE_CONFIGS_DIR / base_config_dir_name
         if config_dir.is_dir():
-            log.info("═══ Phase 1.5: Pushing base configs ═══")
+            log.info("=== Phase 1.5: Pushing base configs ===")
             log.info("  Config dir: %s", config_dir)
             # Call to_dut.py with --yes flag to auto-confirm
             push_cmd = [
@@ -617,7 +617,7 @@ def run_one_testbed(yaml_file, cfg, tb_config):
             log.info("  Running: %s", " ".join(push_cmd))
             push_proc = subprocess.run(push_cmd, capture_output=True, text=True)
             if push_proc.returncode == 0:
-                log.info("  ✓ Base configs pushed successfully")
+                log.info("  [OK] Base configs pushed successfully")
                 if push_proc.stdout:
                     for line in push_proc.stdout.strip().split("\n"):
                         log.info("    %s", line)
@@ -629,15 +629,15 @@ def run_one_testbed(yaml_file, cfg, tb_config):
                     for f in as_completed(futures):
                         f.result()
             else:
-                log.warning("  ✗ Failed to push configs (continuing anyway)")
+                log.warning("  [FAIL] Failed to push configs (continuing anyway)")
                 if push_proc.stderr:
                     log.warning("    %s", push_proc.stderr.strip())
         else:
             log.warning("  Config dir not found: %s (skipping)", config_dir)
     elif skip_config:
-        log.info("═══ Phase 1.5: Base configs SKIPPED ═══")
+        log.info("=== Phase 1.5: Base configs SKIPPED ===")
 
-    # ── Get real build ID and branch from DUT ──
+    # -- Get real build ID and branch from DUT --
     dut_branch, dut_build_id = get_version_info_from_dut(duts[0])
     if dut_build_id:
         log.info("Version from DUT: branch=%s build=%s", dut_branch, dut_build_id)
@@ -647,8 +647,8 @@ def run_one_testbed(yaml_file, cfg, tb_config):
     else:
         log.warning("Could not get version from DUT, using: branch=%s build=%s", tb_branch, tb_build_id)
 
-    # ── Phase 2: Run tests ──
-    log.info("═══ Phase 2: Running tests (%s) on %s ═══", test, tb)
+    # -- Phase 2: Run tests --
+    log.info("=== Phase 2: Running tests (%s) on %s ===", test, tb)
 
     profile_suffix = tb_config.get("profile_suffix", "unknown")
     # Split test string into separate arguments for multiple tests
@@ -659,8 +659,8 @@ def run_one_testbed(yaml_file, cfg, tb_config):
     test_proc = subprocess.run(cmd, cwd=spytest_dir, stdin=subprocess.DEVNULL)
     test_rc = test_proc.returncode
 
-    # ── Phase 3: Transfer logs (only when --publish is specified) ──
-    log.info("═══ Phase 3: Transferring logs ═══")
+    # -- Phase 3: Transfer logs (only when --publish is specified) --
+    log.info("=== Phase 3: Transferring logs ===")
     # run_test.sh names the log dir using profile_suffix (lowercase)
     run_log_dirs = sorted(glob.glob(str(spytest_dir / f"run_logs_{profile_suffix.lower()}_*")), reverse=True)
     latest_log_dir = None
@@ -681,9 +681,9 @@ def run_one_testbed(yaml_file, cfg, tb_config):
         log.warning("No run_logs directory found for %s (suffix=%s) under %s",
                     tb, profile_suffix.lower(), spytest_dir)
 
-    # ── Phase 4: Publish to dashboard (before local cleanup) ──
+    # -- Phase 4: Publish to dashboard (before local cleanup) --
     if do_publish and latest_log_dir and os.path.isdir(latest_log_dir):
-        log.info("═══ Phase 4: Publishing to dashboard ═══")
+        log.info("=== Phase 4: Publishing to dashboard ===")
 
         publish_cmd = [
             sys.executable, str(PUBLISH_SCRIPT),
@@ -702,23 +702,23 @@ def run_one_testbed(yaml_file, cfg, tb_config):
         try:
             publish_proc = subprocess.run(publish_cmd, capture_output=True, text=True, timeout=300)
             if publish_proc.returncode == 0:
-                log.info("  ✓ Published to dashboard")
+                log.info("  [OK] Published to dashboard")
                 # Extract result IDs from output
                 for line in publish_proc.stdout.split("\n"):
                     if "Result ID:" in line:
                         log.info("    %s", line.strip())
             else:
-                log.warning("  ✗ Failed to publish to dashboard")
+                log.warning("  [FAIL] Failed to publish to dashboard")
                 if publish_proc.stderr:
                     log.warning("    %s", publish_proc.stderr.strip()[:200])
         except subprocess.TimeoutExpired:
-            log.warning("  ✗ Publish timed out")
+            log.warning("  [FAIL] Publish timed out")
         except Exception as e:
-            log.warning("  ✗ Publish failed: %s", e)
+            log.warning("  [FAIL] Publish failed: %s", e)
     else:
-        log.info("═══ Phase 4: Publish SKIPPED (--publish not specified or no logs) ═══")
+        log.info("=== Phase 4: Publish SKIPPED (--publish not specified or no logs) ===")
 
-    # ── Copy *logs.log to spytest dir for easy access ──
+    # -- Copy *logs.log to spytest dir for easy access --
     saved_log = None
     if latest_log_dir and os.path.isdir(latest_log_dir):
         logs_log_files = glob.glob(os.path.join(latest_log_dir, "*logs.log"))
@@ -732,15 +732,15 @@ def run_one_testbed(yaml_file, cfg, tb_config):
             except Exception as e:
                 log.warning("Could not copy logs.log: %s", e)
 
-    # ── Remove local run_logs directory (only after successful publish) ──
+    # -- Remove local run_logs directory (only after successful publish) --
     if do_publish and latest_log_dir and os.path.isdir(latest_log_dir):
         cleanup_local_logs(latest_log_dir)
 
     duration = int((time.time() - start) / 60)
     if test_rc == 0:
-        log.info("✓ Testbed %s COMPLETE (%dm)", tb, duration)
+        log.info("[OK] Testbed %s COMPLETE (%dm)", tb, duration)
     else:
-        log.error("✗ Testbed %s FAILED (exit=%d, %dm)", tb, test_rc, duration)
+        log.error("[FAIL] Testbed %s FAILED (exit=%d, %dm)", tb, test_rc, duration)
     if saved_log:
         log.info("Consolidated log: %s", saved_log)
 
@@ -815,11 +815,11 @@ def schedule_run(args):
         sys.exit(1)
 
 
-# ── Main ─────────────────────────────────────────────────────────────────
+# -- Main -----------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="SPYtest Job Runner — run QoS tests on a single testbed",
+        description="SPYtest Job Runner -- run QoS tests on a single testbed",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Testbed IDs:
@@ -933,7 +933,7 @@ Examples:
 
     log.info("")
     log.info("=" * 64)
-    log.info("  %s  %s  (%dm)", "✓ PASS" if success else "✗ FAIL", yaml_path.stem, duration)
+    log.info("  %s  %s  (%dm)", "[OK] PASS" if success else "[FAIL] FAIL", yaml_path.stem, duration)
     log.info("  Log: %s", master_log)
     log.info("=" * 64)
 

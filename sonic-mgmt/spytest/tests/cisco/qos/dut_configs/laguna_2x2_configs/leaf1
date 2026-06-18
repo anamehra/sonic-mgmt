@@ -7345,16 +7345,6 @@
             "VERSION": "version_202405_01"
         }
     },
-    "VLAN": {
-        "Vlan100": {
-            "vlanid": "100"
-        }
-    },
-    "VLAN_MEMBER": {
-        "Vlan100|Ethernet1_64_2": {
-            "tagging_mode": "untagged"
-        }
-    },
     "WRED_PROFILE": {
         "AZURE_LOSSLESS": {
             "ecn": "ecn_green_yellow",

@@ -90,12 +90,12 @@ def activate_config(dut):
     except subprocess.TimeoutExpired:
         # config reload restarts services and often kills the SSH session;
         # a timeout or disconnect here is expected, not a failure.
-        return dut["name"], True, "OK (SSH disconnected during reload — expected)"
+        return dut["name"], True, "OK (SSH disconnected during reload -- expected)"
 
     # Non-zero rc with empty stderr almost always means the SSH session was
     # dropped by the reload (services restarting).  Treat it as success.
     if rc != 0 and not err:
-        return dut["name"], True, "OK (SSH disconnected during reload — expected)"
+        return dut["name"], True, "OK (SSH disconnected during reload -- expected)"
     if rc != 0:
         return dut["name"], False, f"config reload failed: {err}"
 

@@ -4638,49 +4638,6 @@
             "VERSION": "version_202405_01"
         }
     },
-    "VLAN": {
-        "Vlan2": {
-            "vlanid": "2"
-        },
-        "Vlan100": {
-            "vlanid": "100"
-        }
-    },
-    "VLAN_INTERFACE": {
-        "Vlan2": {
-            "vrf_name": "Vrf01"
-        },
-        "Vlan100": {
-            "vrf_name": "Vrf01"
-        }
-    },
-    "VLAN_MEMBER": {
-        "Vlan2|Ethernet1_7_4": {
-            "tagging_mode": "untagged"
-        }
-    },
-    "VRF": {
-        "Vrf01": {
-            "vni": "1000"
-        },
-        "default": {}
-    },
-    "VXLAN_EVPN_NVO": {
-        "NVO": {
-            "source_vtep": "VXLAN"
-        }
-    },
-    "VXLAN_TUNNEL": {
-        "VXLAN": {
-            "src_ip": "2001:db8:1::2"
-        }
-    },
-    "VXLAN_TUNNEL_MAP": {
-        "VXLAN|map_1000_Vlan100": {
-            "vlan": "Vlan100",
-            "vni": "1000"
-        }
-    },
     "WRED_PROFILE": {
         "AZURE_LOSSLESS": {
             "ecn": "ecn_green_yellow",

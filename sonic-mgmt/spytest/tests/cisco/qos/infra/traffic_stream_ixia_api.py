@@ -253,6 +253,20 @@ def init_qos_on_dut(dut, tc_list=[3, 4], force=True):
 
         _tgen_port_count[leaf] = port_cnt
         st.log(f'IXIA port cnt {port_cnt}')
+
+        # Attach STC ports before polling link status (a previous module may
+        # have detached them via release_all_ports).
+        if tgen_handle is None:
+            for _d in ['D1', 'D2', 'D3', 'D4']:
+                _key = 'T1{}P1'.format(_d)
+                try:
+                    tgen_handle, _ = tgapi.get_handle_byname(_key)
+                    if tgen_handle is not None:
+                        break
+                except Exception:
+                    continue
+        attach_all_ports()
+
         up_cnt = 0
         # Try upto 60 seconds to ensure ports are up
         for i in range(1, port_cnt + 1):
@@ -1311,11 +1325,34 @@ def create_pfc_xoff_burst_stream(tg_unused, tgen_port, src_mac, rate_fps,
 
     return stream_id
 
-def release_all_ports():
+def _get_stc_port_list():
+    """Build STC port handle list string from actual reserved port count."""
+    count = max(_tgen_port_count.values()) if _tgen_port_count else 2
+    return " ".join(f"port{i}" for i in range(1, count + 1))
+
+
+def attach_all_ports():
+    if tgen_handle is None:
+        return
     if tgen_handle.tg_type == 'stc':
+        port_list = _get_stc_port_list()
+        st.log(f"STC AttachPorts: {port_list}")
         try:
             tgen_handle.local_stc_tapi_call(
-                'stc::perform DetachPorts -PortList "port1 port2 port3"')
+                f'stc::perform AttachPorts -PortList "{port_list}" -AutoConnect true')
+            tgen_handle.local_stc_tapi_call('stc::apply')
+        except Exception as e:
+            st.report_fail('msg', f'STC AttachPorts failed: {e}')
+
+
+def release_all_ports():
+    if tgen_handle is None:
+        return
+    if tgen_handle.tg_type == 'stc':
+        port_list = _get_stc_port_list()
+        try:
+            tgen_handle.local_stc_tapi_call(
+                f'stc::perform DetachPorts -PortList "{port_list}"')
             tgen_handle.local_stc_tapi_call('stc::apply')
         except Exception:
             pass

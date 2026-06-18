@@ -3,7 +3,7 @@
 Shared library for spytest result parsing utilities.
 
 Used by:
-  - spytest_publish.py (full workflow: parse → XML → upload → dashboard)
+  - spytest_publish.py (full workflow: parse -> XML -> upload -> dashboard)
   - spytest_summary.py (quick local summary)
 """
 import os
@@ -60,7 +60,7 @@ def extract_build_id(results_dir):
         return match.group(1)
     
     # Try pattern: *_<build_id> at end (4+ digits)
-    # Skip run_logs_* dirs — trailing digits are timestamps (YYYYMMDD_HHMMSS)
+    # Skip run_logs_* dirs -- trailing digits are timestamps (YYYYMMDD_HHMMSS)
     if not dirname.startswith('run_logs_'):
         match = re.search(r'_(\d{4,})$', dirname)
         if match:
@@ -217,10 +217,10 @@ def format_duration(total_secs):
 
 # Status symbols for display
 STATUS_SYMBOLS = {
-    'Pass': '✓',
-    'Fail': '✗',
-    'ConfigFail': '⚠',
-    'TGenFail': '⚡',
-    'ScriptError': '⚠',
-    'Unsupported': '○'
+    'Pass': '[OK]',
+    'Fail': '[FAIL]',
+    'ConfigFail': '[WARN]',
+    'TGenFail': '[!]',
+    'ScriptError': '[WARN]',
+    'Unsupported': '*'
 }

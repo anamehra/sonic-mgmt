@@ -17,7 +17,7 @@ REPO_LAYOUT = {
     "oci-sonic-mgmt": "spytest",             # oci-sonic-mgmt/spytest
 }
 
-# ── Testbed configs keyed by YAML filename ────────────────────────────────
+# -- Testbed configs keyed by YAML filename --------------------------------
 # Each entry carries everything the tools need so nothing is hardcoded elsewhere.
 #
 #   runner_platform  : platform arg passed to run_test.sh (selects docker image, test path, etc.)
@@ -46,7 +46,7 @@ LOCK_SERVER_PASSWORD = CONTAINER_SERVER["password"]
 # Admin password for hidden/privileged operations (--force, --expire-stale)
 ADMIN_PASSWORD = "cmRtYTEyMw=="
 
-# ── Testbed ID shorthand (for --testbed <int> on CLI) ─────────────────────
+# -- Testbed ID shorthand (for --testbed <int> on CLI) ---------------------
 TESTBED_IDS = {
     10000: ("tortuga_2x2_Q200_testbed.yaml", "carib/siren"),
     10001: ("tortuga_2x2_G200_testbed.yaml",      "laguna"),
@@ -174,7 +174,7 @@ def discover_repo(yaml_path):
                     return repo_candidate, spytest_dir
             return spytest_dir.parent.parent if spytest_dir.parent.name == "sonic-mgmt" else spytest_dir.parent, spytest_dir
 
-    # YAML is not under the spytest tree (e.g. in spytest_tb_files/) — use git root
+    # YAML is not under the spytest tree (e.g. in spytest_tb_files/) -- use git root
     repo_root = _get_repo_root(cwd=str(yaml_path.parent))
     if repo_root:
         candidate = repo_root / "sonic-mgmt" / "spytest"
