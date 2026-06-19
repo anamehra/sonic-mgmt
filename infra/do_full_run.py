@@ -10,9 +10,11 @@ import json
 import paramiko
 from datetime import timedelta
 import re
+import shlex
 from hw_setup_utils import log, extractFromImageName, getTestbedInfoDict, getDockerExecCommand, \
     prep_special_run_commands, \
-    run_scripts, sshUtil, allure_directory, UNSET_PROXY, runIndividualTests, getLatestValidAllureReport, \
+    run_scripts, sshUtil, allure_directory, allure_results_dir_for_build_id, allure_run_dir_for_build_id, UNSET_PROXY, runIndividualTests, \
+    getLatestValidAllureReport, fetch_allure_report_summary, \
     checkForExistingRuns, SSH_PORT, collect_spytest_results, upload_result, ALLURE_CONFIG_FILE_NAME, \
     getSonicMgmtContainterName, getTechSupport, \
     nested_ssh_connection, DUT_USERNAME, DUT_PASSWORD, WORKSPACE, SANITY_LOGS_PATH, getLogsPath
@@ -129,6 +131,16 @@ def run_test(args):
     if skip_tests=="null" or skip_tests==None:
         skip_tests = ""
     rerun = args.rerun
+
+    # Allure raw results root is scoped by sonic image_id (not Jenkins build_id). Keep in sync
+    # with hw_setup_utils.generate_allure_report_and_copy_to_remote (same allure_results_dir_for_build_id arg).
+    try:
+        build_scoped_allure = allure_results_dir_for_build_id(allure_directory, image_id)
+    except ValueError as e:
+        log.error(str(e))
+        return -1
+    # Reruns append under this tree; a fresh non-rerun clears this path. Never write to bare local-report-dir.
+
     testbed_info_dict = getTestbedInfoDict(testbed)
 
     # temporary fix to running spytest 2 extra times because this
@@ -214,9 +226,26 @@ def run_test(args):
     stdout, stderr, status_code = _run_cmd_in_ssh(client, "docker ps -a")
     log.debug(f"'docker ps -a' output:\n{stdout}")
     log.debug(rerun)
-    # Clean up allure results directory if not a rerun
-    if rerun == False or rerun == "false":
-        stdout, stderr, status_code = _run_cmd_in_ssh_container(client, container_name, f"cd {allure_directory} && find . -mindepth 1 -delete")
+    # Fresh run (non-rerun): clear this image_id's Allure results root only; other image_ids untouched.
+    if rerun!="true":
+        stdout, stderr, status_code = _run_cmd_in_ssh_container(
+            client, container_name, f"rm -rf {shlex.quote(build_scoped_allure)}"
+        )
+    else:
+        log.info("Rerun mode: appending Allure results under %s", build_scoped_allure)
+
+    try:
+        effective_allure_dir = allure_run_dir_for_build_id(build_scoped_allure, build_id)
+    except ValueError as e:
+        log.error(str(e))
+        client.close()
+        return -1
+    _run_cmd_in_ssh_container(
+        client,
+        container_name,
+        f"mkdir -p {shlex.quote(effective_allure_dir)}",
+    )
+    log.info("Using Allure run directory: %s", effective_allure_dir)
 
     dut_run_log_folder = f'{image_id}_jenkins_logs_{build_id}_{testbed}'
     dut_log_dir = f'/run_logs/{dut_run_log_folder}'
@@ -229,7 +258,7 @@ def run_test(args):
         test_suites_array = get_testcases(testfile_full_path, test_tag, topo_type=topology, additional_tests='', device_type=platform, hw_or_sim='hw')
         with sftp.file(remote_file_path, mode='a') as remote_file:
             for test_suite in test_suites_array:
-                exit_code, _ = runIndividualTests(image_id, build_id, testbed, dut_log_dir, client, container_name, test_suite, test_suite, "", "", local_log_dir, testbed_info_dict, remote_file)
+                exit_code, _ = runIndividualTests(image_id, build_id, testbed, dut_log_dir, client, container_name, test_suite, test_suite, "", "", local_log_dir, testbed_info_dict, allure_results_dir=effective_allure_dir, remote_file=remote_file)
                 if exit_code!=0:
                     time.sleep(30)
                     client.close()
@@ -267,7 +296,7 @@ def run_test(args):
     elif test_suites_arg and "," in test_suites_arg: # multiple test suites passed as parameters
         test_suites_array = test_suites_arg.split(",")  # ['bgp', 'monit']
         for test_suite in test_suites_array:
-            exit_code, _ = runIndividualTests(image_id, build_id, testbed, dut_log_dir, client, container_name, test_suite, test_suite, skip_folders_final, skip_tests_final, local_log_dir, testbed_info_dict)
+            exit_code, _ = runIndividualTests(image_id, build_id, testbed, dut_log_dir, client, container_name, test_suite, test_suite, skip_folders_final, skip_tests_final, local_log_dir, testbed_info_dict, allure_results_dir=effective_allure_dir)
             if exit_code!=0:
                 time.sleep(30)
                 client.close()
@@ -277,7 +306,7 @@ def run_test(args):
 
         exit_code, results = runIndividualTests(image_id, build_id, testbed, dut_log_dir, client, container_name,
                                                 test_suites_arg, test_suites_arg, skip_folders_final, skip_tests_final,
-                                                local_log_dir, testbed_info_dict)
+                                                local_log_dir, testbed_info_dict, allure_results_dir=effective_allure_dir)
 
         log_file_contents, _, _ = _run_cmd_in_ssh_container(client,
                                                             container_name,
@@ -360,7 +389,7 @@ def run_test(args):
                                                         container_name, test_suites_arg, test_suites_arg,
                                                         skip_folders_final,
                                                         skip_tests_final + " " + extra_skip_tests_str,
-                                                        local_log_dir, testbed_info_dict)
+                                                        local_log_dir, testbed_info_dict, allure_results_dir=effective_allure_dir)
                 log_file_contents, _, _ = _run_cmd_in_ssh_container(client,
                                                                     container_name,
                                                                     f"tail -n 50 /data/tests/{results.run_tests_log_file}")
@@ -378,11 +407,12 @@ def run_test(args):
     elif test_suites_arg:  # test_suites provided, other than "All"
         exit_code, results = runIndividualTests(image_id, build_id, testbed, dut_log_dir, client, container_name,
                                                 test_suites_arg, test_suites_arg, skip_folders_final, skip_tests_final,
-                                                local_log_dir, testbed_info_dict)
+                                                local_log_dir, testbed_info_dict, allure_results_dir=effective_allure_dir)
 
     else:
         log.error(f"No tests found! TEST_SUITES: {test_suites_arg}, TESTFILE: {testfile}, TEST_TAG: {test_tag}")
         return -1
+
     log.debug("Timeout for 2 minutes to let the run finish")
     time.sleep(120)
     client.close()
@@ -483,18 +513,24 @@ def collect_results(args):
                 result = result_sum
                 log.debug(f"result sum for test_suites: '{test_suite}', {result}")
     else:
-        [report_data, allure_link] = getLatestValidAllureReport(build_id, image_id, testbed, stream)
-        if not report_data:
-            log.error("Report Data not found!")
-            return -1
-
+        [allure_link, allure_link_combined] = getLatestValidAllureReport(
+            build_id, image_id, testbed, stream
+        )
         if not allure_link:
             log.error("Allure link not found!")
             return -1
 
+        published_allure_link = allure_link_combined or allure_link
+        log.info("Allure report (this run / primary): %s", allure_link)
+        log.info("Allure report (combined all run_* under image): %s", allure_link_combined)
+        log.info("Allure report (published): %s", published_allure_link)
+
+        report_data = fetch_allure_report_summary(published_allure_link)
+        if not report_data:
+            log.error("Report Data not found!")
+            return -1
+
         log.debug(f"report_data:{report_data}")
-        log.debug(f"allure_link: {allure_link}")
-        
         stats = report_data["statistic"]
         if stats["total"] == 0:
             result["report_link"] = None
@@ -513,7 +549,7 @@ def collect_results(args):
                 "errored" : stats["broken"],
                 "skipped" : stats["skipped"],
                 "success_rate" : round(percent, 2),
-                "report_link": allure_link,
+                "report_link": published_allure_link,
                 "status": SUCCESS_STATUS if round(percent, 2) == 100.0 else FAILURE_STATUS,
                 "log_path": os.path.join(logs_path, dut_run_log_folder),
                 "ucs_server": testbed_info_dict["ucs_host_name"]

@@ -14,6 +14,9 @@ from utils import _run_cmd_in_ssh, _run_cmd_in_ssh_container, copy_logfiles
 from typing import Tuple, Any, Dict, List, Union
 import stat
 import argparse
+import shlex
+import re
+from urllib import parse
 
 JsonObject = Dict[str, Any]
 
@@ -116,8 +119,8 @@ telnet_lab_password = "lab"
 
 SUMMARY_REPORT_FILENAME = "results.json"
 COMMON_REPORT_FILENAME = "sonic-whitebox-common.report"
-SUMMARY_REPORT_PATH = "../../{}".format(SUMMARY_REPORT_FILENAME)
-COMMON_REPORT_PATH = "../../{}".format(COMMON_REPORT_FILENAME)
+SUMMARY_REPORT_PATH = f"../../{SUMMARY_REPORT_FILENAME}"
+COMMON_REPORT_PATH = f"../../{COMMON_REPORT_FILENAME}"
 
 MAX_PARTS_IMAGE_NAME = 6
 START_INDEX_IMAGE = 2
@@ -189,6 +192,239 @@ with open(ALLURE_CONFIG_FILE_NAME, "r") as config_file:
     config_file.close()
 
 allure_directory = allure_config['allure']['local-report-dir']
+
+
+def ensure_allure_installed_in_container(ssh, hostname, container_name):
+    """Install the Allure CLI in the sonic-mgmt container when it is missing."""
+    stdout, stderr, status_code = _run_cmd_in_ssh_container(ssh, container_name, "allure --version")
+    if status_code == 0:
+        log.info(f"Allure already installed in container {container_name}: {stdout.strip()}")
+        return 0
+
+    log.info(f"Allure not found in container {container_name}, installing from debian package")
+    destination_path = "/data"
+    testbed_mount_dir = get_container_local_mount_dir(ssh, container_name, destination_path)
+
+    allure_debian_url = allure_config["allure"]["debian-url"]
+    if not allure_debian_url:
+        raise Exception("allure debian package URL is not provided")
+
+    package_name = os.path.basename(parse.urlparse(allure_debian_url).path)
+
+    clear_debs = f"cd {shlex.quote(testbed_mount_dir)} && rm -f allure*.deb*"
+    _, _, clear_status = _run_cmd_in_ssh(ssh, clear_debs)
+    if clear_status != 0:
+        raise Exception(f"Failed to clear existing Allure .deb files under {testbed_mount_dir}")
+
+    wget_cmd = f"wget {shlex.quote(allure_debian_url)} -P {shlex.quote(testbed_mount_dir)}"
+    stdout, stderr, status_code = _run_cmd_in_ssh(ssh, wget_cmd)
+    if status_code != 0:
+        raise Exception(f"Failed to download allure package: stdout={stdout}, stderr={stderr}")
+
+    stdout, stderr, status_code = _run_cmd_in_ssh_container(
+        ssh, container_name, f"sudo dpkg -i {destination_path}/{package_name}"
+    )
+    if status_code != 0:
+        raise Exception(f"Failed to install allure package: stdout={stdout}, stderr={stderr}")
+
+    stdout, stderr, status_code = _run_cmd_in_ssh_container(ssh, container_name, "allure --version")
+    if status_code != 0:
+        raise Exception(f"Failed to verify allure installation: stdout={stdout}, stderr={stderr}")
+
+    cleanup_debs = f"cd {shlex.quote(testbed_mount_dir)} && rm -f allure*.deb*"
+    _run_cmd_in_ssh(ssh, cleanup_debs)
+    log.info(f"Allure installed successfully in container {container_name} on {hostname}")
+    return 0
+
+
+_SAFE_ALLURE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _validate_allure_path_component(component_name, value):
+    """Reject scope/build ids that would be unsafe in container shell paths."""
+    s = str(value)
+    if not _SAFE_ALLURE_PATH_COMPONENT.fullmatch(s):
+        raise ValueError(
+            f"Invalid {component_name} {value!r}: must contain only letters, digits, '.', '_', and '-'"
+        )
+    return s
+
+
+def allure_results_dir_for_build_id(base_dir, scope_id):
+    """
+    Directory for Allure raw results under base_dir, suffix ``_build_<safe>``.
+
+    HW sanity uses **sonic image_id** as scope_id (must match ``do_full_run.run_test``); the
+    parameter name is historical. Reruns append new ``run_*`` children under this path.
+    """
+    safe = _validate_allure_path_component("scope_id", scope_id)
+    return f"{base_dir.rstrip('/')}_build_{safe}"
+
+
+def allure_run_dir_for_build_id(build_scoped_path, build_id):
+    """Per-Jenkins-build Allure results dir: ``<image-scoped root>/run_<build_id>``."""
+    safe_build_id = _validate_allure_path_component("build_id", build_id)
+    return f"{build_scoped_path.rstrip('/')}/run_{safe_build_id}"
+
+
+def allure_results_path_has_data(ssh, container_name, path):
+    """Return True if the container path contains pytest-allure *-result.json files."""
+    q = shlex.quote(path)
+    cmd = "test -d {} && find {} -maxdepth 6 -type f -name '*-result.json' 2>/dev/null | head -n 1 | wc -l".format(
+        q, q
+    )
+    stdout, stderr, status_code = _run_cmd_in_ssh_container(ssh, container_name, cmd)
+    if status_code != 0:
+        return False
+    try:
+        return int(stdout.strip()) > 0
+    except ValueError:
+        return False
+
+
+def list_run_subdirs_under_build(ssh, container_name, build_scoped_path):
+    """
+    Every direct child directory named run_* under build_scoped_path (no *-result.json filter).
+    Used as the full input set for the combined Allure report.
+    """
+    q = shlex.quote(build_scoped_path)
+    cmd = (
+        "if [ ! -d {p} ]; then exit 0; fi; "
+        "find {p} -mindepth 1 -maxdepth 1 -type d -name 'run_*' -print | sort".format(p=q)
+    )
+    stdout, _, status_code = _run_cmd_in_ssh_container(ssh, container_name, cmd)
+    if status_code != 0:
+        return []
+    return [line.strip() for line in stdout.splitlines() if line.strip()]
+
+
+def allure_run_dirs_and_valid_sources(ssh, container_name, build_scoped_path, build_id=None):
+    """
+    Returns (all_run_subdirs, dirs_with_allure_results).
+
+    all_run_subdirs: all run_* children under the build folder.
+    dirs_with_allure_results: directories used for the primary Allure report. When build_id is
+    given and run_* layout is in use, only the current ``run_<build_id>`` dir is returned and
+    only if it contains *-result.json (older runs may still appear in all_run_subdirs for a
+    combined report). Without build_id, any run_* dir with results is accepted (legacy callers).
+    Legacy layout (no run_*): ([], [build_scoped_path]) when the build root has results.
+    """
+    run_subdirs = list_run_subdirs_under_build(ssh, container_name, build_scoped_path)
+    if run_subdirs:
+        if build_id is not None:
+            current_run = allure_run_dir_for_build_id(build_scoped_path, build_id)
+            if not allure_results_path_has_data(ssh, container_name, current_run):
+                return run_subdirs, []
+            return run_subdirs, [current_run]
+        valid = [d for d in run_subdirs if allure_results_path_has_data(ssh, container_name, d)]
+        return run_subdirs, valid
+    if allure_results_path_has_data(ssh, container_name, build_scoped_path):
+        return [], [build_scoped_path]
+    return [], []
+
+
+def list_allure_result_sources_for_build(ssh, container_name, build_scoped_path):
+    """
+    Return run directories under build_scoped_path that contain *-result.json files.
+    Falls back to build_scoped_path itself when legacy layout stores results directly there.
+    """
+    _, valid = allure_run_dirs_and_valid_sources(ssh, container_name, build_scoped_path)
+    return valid
+
+
+def newest_run_results_dir(ssh, container_name, all_sources):
+    """
+    Pick the latest run_* folder under a build (highest numeric suffix) that contains Allure results.
+    Used for the per-run HTML report when multiple run_* dirs exist; combined report uses all_sources.
+    """
+    if not all_sources:
+        return ""
+    best = ""
+    best_n = -1
+    for s in all_sources:
+        m = re.search(r"/run_(\d+)$", s)
+        if not m:
+            continue
+        n = int(m.group(1))
+        if n > best_n and allure_results_path_has_data(ssh, container_name, s):
+            best_n = n
+            best = s
+    if best:
+        return best
+    for s in all_sources:
+        if allure_results_path_has_data(ssh, container_name, s):
+            return s
+    return all_sources[-1]
+
+
+def _run_index_suffix_for_path(results_path):
+    m = re.search(r"/run_(\d+)$", results_path or "")
+    return m.group(1) if m else None
+
+
+def _publish_one_allure_report(
+    ssh,
+    container_name,
+    container_channel,
+    testbed_mount_dir,
+    destination_path,
+    allure_report_directory_name,
+    allure_display_name,
+    sources_arg,
+):
+    """
+    Run allure generate inside the container, archive, copy to local and remote report dir, cleanup.
+    Returns (exit_code, report_url_or_error_string).
+    """
+    generate_cmd = (
+        f"allure generate --name {shlex.quote(allure_display_name)} "
+        f"-o /tmp/{allure_report_directory_name} {sources_arg}"
+    )
+    stdout, stderr, status_code = _run_cmd_in_ssh_container(ssh, container_name, generate_cmd)
+    if status_code != 0:
+        err = f"Failed to generate allure report: stdout={stdout}, stderr={stderr}"
+        log.error(err)
+        return -1, err
+
+    _run_cmd_in_channel(
+        container_channel,
+        f"tar -cvzf {destination_path}/{allure_report_directory_name}.tar.gz /tmp/{allure_report_directory_name}",
+        True,
+    )
+
+    _run_cmd_in_channel(
+        container_channel,
+        f"rm -rf /tmp/{allure_report_directory_name}",
+        True,
+    )
+
+    ftp_client = ssh.open_sftp()
+    try:
+        ftp_client.get(
+            f"{testbed_mount_dir}/{allure_report_directory_name}.tar.gz",
+            f"/tmp/{allure_report_directory_name}.tar.gz",
+        )
+    finally:
+        ftp_client.close()
+
+    result = os.system(f"tar -xvzf /tmp/{allure_report_directory_name}.tar.gz -C /")
+    if result != 0:
+        return -1, "failed to extract the allure report tarball"
+
+    remote_report_dir = allure_config["allure"]["remote-report-dir"]
+    remote_report_dir = remote_report_dir if remote_report_dir.endswith("/") else remote_report_dir + "/"
+    result = os.system(f"cp -R /tmp/{allure_report_directory_name} {remote_report_dir}/")
+    if result != 0:
+        return -1, "failed to copy the allure report to remote"
+
+    os.system(f"rm -rf /tmp/{allure_report_directory_name}")
+    os.system(f"rm -rf /tmp/{allure_report_directory_name}.tar.gz")
+
+    allure_report_url = (
+        f"{allure_config['allure']['server-base-url']}/{remote_report_dir}{allure_report_directory_name}"
+    )
+    return 0, allure_report_url
+
 
 UNSET_PROXY = "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy"
 MAX_RETRIES = 10
@@ -602,7 +838,7 @@ def updateGitDir(host, ssh_port, username, password, dir):
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(host, ssh_port, username, password)
-        print("connected to host {}".format(host))
+        print(f"connected to host {host}")
         if SONIC_TEST_BRANCH:
             branch = SONIC_TEST_BRANCH
         else:
@@ -640,7 +876,7 @@ def run_scripts(host, username, password, cmd_list, prompt, ssh_port=SSH_PORT, u
     log.debug(f"{host}, {ssh_port}, {username}, {password}")
     log.debug(f"{type(host)}, {type(ssh_port)}, {type(username)}, {type(password)}")
     ssh.connect(host, ssh_port, username, password)
-    print("connected to host {}".format(host))
+    print(f"connected to host {host}")
     chan = ssh.invoke_shell()
     resp = ''
     time.sleep(5)
@@ -947,7 +1183,7 @@ def get_container_local_mount_dir(ssh, container_name, destination_path):
 
     _, stdout, stderr = ssh.exec_command(cmd)
     if stdout.channel.recv_exit_status() != 0:
-        err = "failed to run {}: {}".format(cmd, stderr.read().decode("ascii").strip())
+        err = f"failed to run {cmd}: {stderr.read().decode('ascii').strip()}"
         log.error(err)
         raise Exception(err)
 
@@ -972,85 +1208,165 @@ def get_container_local_mount_dir(ssh, container_name, destination_path):
 
 
 def generate_allure_report_and_copy_to_remote(build_id, testbed, image_id, stream):
-    # Get config
+    """
+    Publish Allure HTML to the configured remote.
+
+    When multiple run_* result folders exist under the same image_id-scoped Allure results root,
+    publishes two reports: one from the current run_<build_id> (must contain results), and one
+    merged from every run_* child dir there (including any run folder without *-result.json yet).
+    Otherwise publishes a single report (same directory name as before: allure-report-<allure_id>).
+
+    Returns (status_code, primary_report_url, combined_report_url_or_None). On error, combined is None.
+    """
     testbed_info_dict = getTestbedInfoDict(testbed)
 
-    hostname = testbed_info_dict['ucs_host']
+    hostname = testbed_info_dict["ucs_host"]
 
-
-    # SSH into the testbed server with ssh library
     container_name = getSonicMgmtContainterName(stream, testbed)
-    ssh, container_channel = _get_container_ssh_channel(hostname, testbed_info_dict['ucs_username'], testbed_info_dict['ucs_password'], container_name)
+    ssh, container_channel = _get_container_ssh_channel(
+        hostname, testbed_info_dict["ucs_username"], testbed_info_dict["ucs_password"], container_name
+    )
+    try:
+        ensure_allure_installed_in_container(ssh, hostname, container_name)
+    except Exception as e:
+        log.error(str(e))
+        container_channel.close()
+        ssh.close()
+        return -1, str(e), None
 
-
-    # Get docker mount directory on the testbed server
     destination_path = "/data"
-    log.info("determine local mount dir for container path {}:{}".format(container_name, destination_path))
+    log.info(f"determine local mount dir for container path {container_name}:{destination_path}")
     testbed_mount_dir = get_container_local_mount_dir(ssh, container_name, destination_path)
-    log.info("mount dir of container {}:{} on the testbed {}:{}".format(container_name, destination_path, hostname, testbed_mount_dir))
+    log.info(
+        f"mount dir of container {container_name}:{destination_path} on the testbed {hostname}:{testbed_mount_dir}"
+    )
 
-
-    # Generate allure report
     allure_id = create_allure_id(build_id, image_id, testbed)
-    allure_report_directory_name = "allure-report-{}".format(allure_id) 
-    _run_cmd_in_channel(container_channel, 'allure generate --name {} -o /tmp/{} {}'.format(allure_id, allure_report_directory_name, allure_directory), False)
-
-    # tar the allure report directory
-    _run_cmd_in_channel(container_channel, 'tar -cvzf {}/{}.tar.gz /tmp/{}'.format(destination_path, allure_report_directory_name, allure_report_directory_name), True)
-
-    # remove the allure report directory
-    _run_cmd_in_channel(container_channel, 'rm -rf /tmp/{}'.format(allure_report_directory_name), True)
-
-    # Copy the allure report tarball to local
-    ftp_client = ssh.open_sftp()
-    ftp_client.get('{}/{}.tar.gz'.format(testbed_mount_dir, allure_report_directory_name), '/tmp/{}.tar.gz'.format(allure_report_directory_name))
-
-    # extract the allure report tarball on local
-    result = os.system('tar -xvzf /tmp/{}.tar.gz -C /'.format(allure_report_directory_name))
-    if result != 0:
-        err = "failed to extract the allure report tarball"
+    # Must use image_id here (same as do_full_run.run_test); do not switch to jenkins build_id.
+    try:
+        build_scoped = allure_results_dir_for_build_id(allure_directory, image_id)
+    except ValueError as e:
+        log.error(str(e))
+        container_channel.close()
+        ssh.close()
+        return -1, str(e), None
+    run_subdirs, source_dirs = allure_run_dirs_and_valid_sources(
+        ssh, container_name, build_scoped, build_id=build_id
+    )
+    if not source_dirs:
+        if run_subdirs:
+            current_run = allure_run_dir_for_build_id(build_scoped, build_id)
+            err = f"No allure result files found in current run directory {current_run}"
+        else:
+            err = f"No allure result files found under {build_scoped}"
         log.error(err)
-        return -1, err
+        container_channel.close()
+        ssh.close()
+        return -1, err, None
 
-    # copy the allure report to remote
-    remote_report_dir = allure_config['allure']['remote-report-dir']
-    remote_report_dir = remote_report_dir if remote_report_dir.endswith('/') else remote_report_dir + '/'
-    result = os.system('cp -R /tmp/{} {}/'.format(allure_report_directory_name, remote_report_dir))
-    if result != 0:
-        err = "failed to copy the allure report to remote"
-        log.error(err)
-        return -1, err
+    try:
+        # Multiple run_* dirs under the same image_id-scoped path: current run + combined over every run_*.
+        dual_reports = len(run_subdirs) > 1
+        if dual_reports:
+            last_dir = source_dirs[0]
+            run_ix = _run_index_suffix_for_path(last_dir) or "latest"
+            run_slug = f"run-{run_ix}"
+            report_dir_this_run = f"allure-report-{allure_id}-{run_slug}"
+            report_dir_combined = f"allure-report-{allure_id}-combined"
+            sources_this = " ".join(shlex.quote(d) for d in [last_dir])
+            # Combined report: pass every run_* folder under the build, not only dirs that passed the result-file probe.
+            sources_all = " ".join(shlex.quote(d) for d in run_subdirs)
+            log.info(
+                f"Allure combined report inputs: {len(run_subdirs)} run dir(s) under {build_scoped}"
+            )
 
-    # remove the allure report on local
-    os.system('rm -rf /tmp/{}'.format(allure_report_directory_name))
-    os.system('rm -rf /tmp/{}.tar.gz'.format(allure_report_directory_name))
+            display_this = f"{allure_id} ({run_slug.replace('-', '_')})"
+            display_combined = f"{allure_id} (combined)"
 
-    # create report URL
-    allure_report_url = "{}/{}/{}".format(allure_config['allure']['server-base-url'], remote_report_dir, allure_report_directory_name)
+            code, out = _publish_one_allure_report(
+                ssh,
+                container_name,
+                container_channel,
+                testbed_mount_dir,
+                destination_path,
+                report_dir_this_run,
+                display_this,
+                sources_this,
+            )
+            if code != 0:
+                log.error(out)
+                return -1, out, None
 
-    ftp_client.close()
-    container_channel.close()
-    ssh.close()
+            code, out2 = _publish_one_allure_report(
+                ssh,
+                container_name,
+                container_channel,
+                testbed_mount_dir,
+                destination_path,
+                report_dir_combined,
+                display_combined,
+                sources_all,
+            )
+            if code != 0:
+                log.error(out2)
+                return -1, out2, None
 
-    log.info("Allure report generated and copied to remote. Report URL: {}".format(allure_report_url))
-    return 0, allure_report_url
+            log.info(f"Allure this-run report: {out}")
+            log.info(f"Allure combined report: {out2}")
+            return 0, out, out2
+
+        allure_report_directory_name = f"allure-report-{allure_id}"
+        sources_arg = " ".join(shlex.quote(d) for d in source_dirs)
+        code, url = _publish_one_allure_report(
+            ssh,
+            container_name,
+            container_channel,
+            testbed_mount_dir,
+            destination_path,
+            allure_report_directory_name,
+            allure_id,
+            sources_arg,
+        )
+        if code != 0:
+            log.error(url)
+            return -1, url, None
+        log.info(f"Allure report generated and copied to remote. Report URL: {url}")
+        return 0, url, None
+    finally:
+        container_channel.close()
+        ssh.close()
+
 
 def getLatestValidAllureReport(build_id, image_id, testbed, stream):
-    status_code, allure_report_url = generate_allure_report_and_copy_to_remote(build_id, testbed, image_id, stream)
+    status_code, allure_report_url, combined_url = generate_allure_report_and_copy_to_remote(
+        build_id, testbed, image_id, stream
+    )
     if status_code != 0:
         return [None, None]
     log.debug("projects_url: %s" % allure_report_url)
+    if combined_url:
+        log.debug("combined_allure_url: %s" % combined_url)
+    return [allure_report_url, combined_url]
+
+
+def fetch_allure_report_summary(report_base_url):
+    """Fetch widgets/summary.json for the report URL callers publish."""
+    if not report_base_url:
+        return None
+    url = report_base_url + "/widgets/summary.json"
+    log.debug("Allure summary URL: %s", url)
     try:
-        url = allure_report_url+'/widgets/summary.json'
-        log.debug("Report URL: %s" % url)
-        individual_json = getAllureReport(url)
-        log.debug("Report json: %s" % individual_json)
-        if individual_json["statistic"]["total"] != 0:
-            return [individual_json, allure_report_url]
+        summary = getAllureReport(url)
+        if summary == -1 or not isinstance(summary, dict):
+            return None
+        log.debug("Allure summary json: %s", summary)
+        if summary.get("statistic", {}).get("total", 0) == 0:
+            return None
+        return summary
     except Exception as e:
-        log.error("Error: "+str(e))
-        return [None, None]
-    return [None, None]
+        log.error("Error fetching Allure summary: %s", e)
+        return None
+
 
 def getAllureReport(link):
     headers = {
@@ -1119,13 +1435,31 @@ def flushChannel(thread):
             break
     log.debug("flush complete")
 
-def runIndividualTests(image_id, build_id, testbed, dut_log_dir, client, container_name, test_suites, test_name, skip_folders, skip_tests, local_log_dir, testbed_info_dict, remote_file=None):
-    log.debug("runIndividualTests local scope")
+def runIndividualTests(
+    image_id,
+    build_id,
+    testbed,
+    dut_log_dir,
+    client,
+    container_name,
+    test_suites,
+    test_name,
+    skip_folders,
+    skip_tests,
+    local_log_dir,
+    testbed_info_dict,
+    allure_results_dir=None,
+    remote_file=None,
+):
+    log.debug(f"runIndividualTests local scope")
     local_scope = {
         name: redact_for_logging(val) if name == "testbed_info_dict" else val
         for name, val in locals().items()
     }
     log.debug(local_scope)
+
+    allure_dir = allure_results_dir if allure_results_dir is not None else allure_directory
+    quoted_allure_dir = shlex.quote(allure_dir)
 
     testcase_start = datetime.now()
     testcase_start_time = testcase_start.strftime("%Y-%m-%d %H-%M-%S") # Format the datetime object as a string
@@ -1154,7 +1488,7 @@ def runIndividualTests(image_id, build_id, testbed, dut_log_dir, client, contain
             else:
                 log_file_base = test.replace("/", "_").replace(".py", "")
                 run_tests_log_file = f"run_test_{log_file_base}_{datetime.now().strftime('%Y%m%d%H%M%S')}.log"
-                run_cmd = f"{RUN_TESTS_PREFIX} ./run_tests.sh -n {t1} -d {t2} -e -rapP -e --alluredir={allure_directory} -u -e -s -c {test} -p {dut_log_dir} > {run_tests_log_file} 2>&1 &"
+                run_cmd = f"{RUN_TESTS_PREFIX} ./run_tests.sh -n {t1} -d {t2} -e -rapP -e --alluredir={quoted_allure_dir} -u -e -s -c {test} -p {dut_log_dir} > {run_tests_log_file} 2>&1 &"
                 log.info(f'To check logs of the tests, go to vxr@SONiC:{dut_log_dir}')
                 stdout, stderr, status_code = _run_cmd_in_ssh_container(client, container_name, run_cmd)
                 log.debug(f"{run_cmd} output:\n{stdout}")
@@ -1175,7 +1509,7 @@ def runIndividualTests(image_id, build_id, testbed, dut_log_dir, client, contain
         if test_suites == "All":
             extra_params = testbed_info_dict["extra_run_params"] if 'extra_run_params' in testbed_info_dict else ""
             run_tests_log_file = f"run_all_tests_{datetime.now().strftime('%Y%m%d%H%M%S')}.log"
-            run_cmd = f"{RUN_TESTS_PREFIX} ./run_tests.sh -n {t1} -d {t2} -m individual -u -e -rapP -e --alluredir={allure_directory} {extra_params} -t {t},any -p {dut_log_dir} -s \"{skip_tests}\" -S \"{skip_folders}\" > {run_tests_log_file} 2>&1 &"
+            run_cmd = f"{RUN_TESTS_PREFIX} ./run_tests.sh -n {t1} -d {t2} -m individual -u -e -rapP -e --alluredir={quoted_allure_dir} {extra_params} -t {t},any -p {dut_log_dir} -s \"{skip_tests}\" -S \"{skip_folders}\" > {run_tests_log_file} 2>&1 &"
         else:
             extra_params = "-O -e --disable_loganalyzer -e --qos_swap_syncd=False" if test_suites=="qos" else ""
             extra_params = extra_params+" "+testbed_info_dict["extra_run_params"] if 'extra_run_params' in testbed_info_dict else extra_params
@@ -1192,7 +1526,7 @@ def runIndividualTests(image_id, build_id, testbed, dut_log_dir, client, contain
             formatted_time = now.strftime("%Y%m%d%H%M%S")
             test_name_output = test_name.replace("/","_").replace(".py","")
             run_tests_log_file = f"run_test_{test_name_output}_{formatted_time}.log"
-            run_cmd = f"{RUN_TESTS_PREFIX} ./run_tests.sh -n {t1}{dut_flag} -e -rapP -e --alluredir={allure_directory} -m individual -S \"{skip_folders}\" -u {extra_params} {run_flags} -t {t},any -s \"{skip_tests}\" -p {dut_log_dir} > {run_tests_log_file} 2>&1 &"
+            run_cmd = f"{RUN_TESTS_PREFIX} ./run_tests.sh -n {t1}{dut_flag} -e -rapP -e --alluredir={quoted_allure_dir} -m individual -S \"{skip_folders}\" -u {extra_params} {run_flags} -t {t},any -s \"{skip_tests}\" -p {dut_log_dir} > {run_tests_log_file} 2>&1 &"
     
             log.debug(f"run_cmd for test - {test_suites}: {run_cmd}")
     log.debug(f'To check logs of the tests, go to ucs:{dut_log_dir}')
@@ -1316,6 +1650,20 @@ def extractFromImageName(image_name):
         image_id = parts[IMAGE_INDEX]
     
     return [image, image_id, stream]
+
+def run_exec_cmds(thread, cmd_list):
+    for cmd in cmd_list:
+        stdin, stdout, stderr = thread.exec_command(cmd)
+        stdout.channel.recv_exit_status()
+        try:
+            out = stdout.read().decode("ascii").strip()
+            error = stderr.read()
+            log.debug(out)
+            if error:
+                log.error(f'There was an error pulling the runtime: {error}')
+        except:
+            log.debug("Problem decoding output of ssh command")
+    return thread
 
 def getTechSupport(client, local_log_dir):
     log.debug("Entered getTechSupport")

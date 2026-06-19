@@ -2723,7 +2723,8 @@
             "cisco.master.1.1.release",
             "cisco.master.signed",
             "cisco.202405cz.2.1.ztp.release",
-            "cisco.202405c.2"
+            "cisco.202405c.2",
+            "cisco.202505.oci.unsigned"
         ],
         "t1-m6-23-superbolt": "None",
         "b2b-m5-14-superbolt": "None",
