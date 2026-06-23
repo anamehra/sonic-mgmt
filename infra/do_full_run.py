@@ -27,7 +27,17 @@ from demyst.notify_demyst import notify_demyst
 MAX_AUTORECOVERY_AND_RERUN_COUNT = 5
 REGRESSION_FAIL_MARKER = "Skip rest of the scripts if there is any"  # run_tests.sh produces this
 
-
+def should_notify_demyst(enable_demyst, env_type):
+    """Return True when demyst notification should run."""
+    log.debug(enable_demyst)
+    log.debug(not enable_demyst)
+    if not enable_demyst:
+        log.info("Skipping demyst notification: ENABLE_DEMYST is false")
+        return False
+    if env_type == "DEV":
+        log.info("Skipping demyst notification: ENABLE_DEMYST is true but dev pipeline not allowed (ENV_TYPE=DEV)")
+        return False
+    return True
 
 # Parse config file
 allure_config = {}
@@ -140,7 +150,6 @@ def run_test(args):
         log.error(str(e))
         return -1
     # Reruns append under this tree; a fresh non-rerun clears this path. Never write to bare local-report-dir.
-
     testbed_info_dict = getTestbedInfoDict(testbed)
 
     # temporary fix to running spytest 2 extra times because this
@@ -452,11 +461,14 @@ def parse_result_time(x):
     raise TypeError(f"Unsupported type: {type(x)}")
 
 def collect_results(args):
+    enable_demyst = str(getattr(args, "enable_demyst", os.getenv("ENABLE_DEMYST", "true"))).lower() not in ("0", "false", "no", "off", "n", "f")
+    env_type = getattr(args, "env_type", os.getenv("ENV_TYPE", "PROD"))
     full_link = args.full_link
     build_id = args.build_id
     testbed = args.testbed
     [image, image_id, stream] = extractFromImageName(full_link)
     testbed_info_dict = getTestbedInfoDict(testbed)
+    user = args.user
     rc = 0
 
     SUMMARY_REPORT_FILENAME = "results.json"
@@ -566,27 +578,28 @@ def collect_results(args):
     log.debug(log_url)
     result["log_tarball_link"] = log_url
     
-    # Notify demyst 
-    try:
-        # jenkins_build_id is the jenkins job id which is always unique
-        jenkins_build_id = os.getenv("BUILD_ID", "")
-        pipeline_type = os.getenv("PIPELINE_TYPE", "")
-        success, demyst_url = notify_demyst(
-            testbed=testbed,
-            build_id=image_id,  # image_id is the p2build_job_id extracted from image name
-            jenkins_build_id=jenkins_build_id,
-            stream=stream,
-            allure_report_url=result.get("report_link"),
-            syslogs_url=log_url,
-            testbed_info_dict=testbed_info_dict,
-            container_name=getSonicMgmtContainterName(stream, testbed),
-            pipeline_type=pipeline_type
-        )
-        if success and demyst_url:
-            result["demyst_results_url"] = demyst_url
-            log.info(f"Demyst results URL: {demyst_url}")
-    except Exception as e:
-        log.warning(f"Demyst notification failed: {e}")
+    if should_notify_demyst(enable_demyst, env_type):
+        log.debug("Demyst to be triggered")
+        try:
+            # jenkins_build_id is the jenkins job id which is always unique
+            jenkins_build_id = os.getenv("BUILD_ID", "")
+            pipeline_type = os.getenv("PIPELINE_TYPE", "")
+            success, demyst_url = notify_demyst(
+                testbed=testbed,
+                build_id=image_id,  # image_id is the p2build_job_id extracted from image name
+                jenkins_build_id=jenkins_build_id,
+                stream=stream,
+                allure_report_url=result.get("report_link"),
+                syslogs_url=log_url,
+                testbed_info_dict=testbed_info_dict,
+                container_name=getSonicMgmtContainterName(stream, testbed),
+                pipeline_type=pipeline_type
+            )
+            if success and demyst_url:
+                result["demyst_results_url"] = demyst_url
+                log.info(f"Demyst results URL: {demyst_url}")
+        except Exception as e:
+            log.warning(f"Demyst notification failed: {e}")
     
     # Write results.json once at the end
     with open(results_path, "w") as results_file:
@@ -641,6 +654,8 @@ if __name__ == "__main__":
     collect_parser.add_argument("-f", "--full_link", help = "full link", required=True)
     collect_parser.add_argument("-t", "--testbed", help = "testbed", required=True)
     collect_parser.add_argument("-b", "--build_id", help = "build id", required=True)
+    collect_parser.add_argument("--enable-demyst", help = "enable demyst analysis", default = os.getenv("ENABLE_DEMYST", "true"))
+    collect_parser.add_argument("--user", help = "user who triggered the run")
     collect_parser.set_defaults(func=collect_results)
 
     kill_parser = subparser.add_parser("kill", help = "kill runs")
