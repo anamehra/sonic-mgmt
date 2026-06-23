@@ -46,6 +46,14 @@ def _create_parser():
     parser.add_argument('--no-add_ngdp_asic_type', action='store_false', dest='add_ngdp_asic_type', help='Do not add ngdp asic type for conditions where cisco 8000 is targeted, only for sonic-vs', required=False)
     parser.add_argument('--config_reload_delay', action='store_true', help='Increase config reload delay', required=False, default=True)
     parser.add_argument('--no-config_reload_delay', action='store_false', dest='config_reload_delay', help='Disable config reload delay', required=False)
+    parser.add_argument('--static_route_wait', action='store_true',
+                        help='Inject wait_for_traffic_ready() into test_static_route.py '
+                             'so it waits for ARP + ASIC route + ASIC neighbors before '
+                             'every traffic test.  Needed for VXR SIM where the VS bridge '
+                             'takes ~120-170 s to stabilize after warmboot.',
+                        required=False, default=True)
+    parser.add_argument('--no-static_route_wait', action='store_false', dest='static_route_wait',
+                        help='Disable static_route_wait patch', required=False)
     return parser
 
 
@@ -62,6 +70,7 @@ def main():
     rolback_bgp_fix = args['rolback_bgp_fix']
     add_ngdp_asic_type = args['add_ngdp_asic_type']
     config_reload_delay = args['config_reload_delay']
+    static_route_wait = args['static_route_wait']
     #check if the file exists, then exit
     # otherwise, create the file
     print("Applying simulation hooks/patches with the following options:")
@@ -119,6 +128,9 @@ def main():
     if config_reload_delay:
         print("Add delay to config reload")
         replace_line('common/config_reload.py', 'wait_until(wait + 120, 10, 0, sonic_host.check_bgp_session_state_all_asics, bgp_neighbors),', 'wait_until(600, 10, 0, sonic_host.check_bgp_session_state_all_asics, bgp_neighbors),')
+    if static_route_wait:
+        print("Injecting wait_for_traffic_ready() into route/test_static_route.py for VXR SIM")
+        patch_static_route_wait()
     
 def prepend_file(file, content):
     with open(file, 'r') as f:
@@ -251,6 +263,116 @@ def remove_dataacl_table(duthosts):
         config_reload(duthost, config_source="minigraph")
 
 '''
+
+
+def replace_block(file, old_lines, new_lines):
+    """Replace a multi-line block (matched by stripped content) with new_lines."""
+    import shutil
+    with open(file, 'r') as f:
+        content = f.read()
+    old_block = os.linesep.join(old_lines)
+    new_block = os.linesep.join(new_lines)
+    if old_block not in content:
+        # Try \n regardless of platform
+        old_block = '\n'.join(old_lines)
+        new_block = '\n'.join(new_lines)
+    if old_block not in content:
+        print("WARNING: block not found in {}: {}".format(file, old_lines[0]))
+        return
+    content = content.replace(old_block, new_block, 1)
+    with open(file, 'w') as f:
+        f.write(content)
+
+
+def patch_static_route_wait():
+    """
+    Inject wait_for_traffic_ready() into route/test_static_route.py.
+
+    Steps:
+      1. Copy sim_patches/test_static_route_wait.py → route/test_static_route_wait.py
+      2. Prepend the import to test_static_route.py
+      3. Replace each silent ping loop with wait_for_traffic_ready() call
+    """
+    import shutil
+    src_module = os.path.join(os.path.dirname(__file__), 'test_static_route_wait.py')
+    dest_module = 'route/test_static_route_wait.py'
+    target = 'route/test_static_route.py'
+
+    # 1. Deploy the helper module
+    shutil.copy(src_module, dest_module)
+    print("  Copied test_static_route_wait.py -> {}".format(dest_module))
+
+    # 2. Add the import at the top of test_static_route.py
+    import_line = 'from tests.route.test_static_route_wait import wait_for_traffic_ready'
+    prepend_file(target, import_line + os.linesep)
+    print("  Injected import into {}".format(target))
+
+    # 3a. static_route_context – pre-op: replace silent ping loop
+    #     Pass ptfadapter/tbinfo/ip_dst/nexthop_devs so check-4 (traffic probe) runs.
+    replace_block(
+        target,
+        [
+            '        for nexthop_addr in nexthop_addrs:',
+            '            duthost.shell(ping_cmd.format(nexthop_addr), module_ignore_errors=True)',
+        ],
+        [
+            '        wait_for_traffic_ready(duthost, prefix, nexthop_addrs, ipv6=ipv6,',
+            '                              label="pre-op",',
+            '                              ptfadapter=ptfadapter, tbinfo=tbinfo,',
+            '                              ip_dst=ip_dst, nexthop_devs=nexthop_devs)',
+        ]
+    )
+
+    # 3b. static_route_context – post-op: replace "Refresh ARP/NDP entries" block
+    replace_block(
+        target,
+        [
+            '        # Refresh ARP/NDP entries',
+            '        for nexthop_addr in nexthop_addrs:',
+            '            duthost.shell(ping_cmd.format(nexthop_addr), module_ignore_errors=True)',
+        ],
+        [
+            '        # Wait for ARP + ASIC + end-to-end traffic after operation',
+            '        wait_for_traffic_ready(duthost, prefix, nexthop_addrs, ipv6=ipv6,',
+            '                              label="post-op",',
+            '                              ptfadapter=ptfadapter, tbinfo=tbinfo,',
+            '                              ip_dst=ip_dst, nexthop_devs=nexthop_devs)',
+        ]
+    )
+
+    # 3c. run_static_route_test – pre-op: replace "try to refresh arp entry" block
+    replace_block(
+        target,
+        [
+            '        # try to refresh arp entry before traffic testing to improve stability',
+            '        for nexthop_addr in nexthop_addrs:',
+            '            duthost.shell("timeout 1 ping -c 1 -w 1 {}".format(nexthop_addr), module_ignore_errors=True)',
+        ],
+        [
+            '        # Wait for ARP + ASIC + end-to-end traffic before traffic test',
+            '        wait_for_traffic_ready(duthost, prefix, nexthop_addrs, ipv6=ipv6,',
+            '                              label="run-pre-op",',
+            '                              ptfadapter=ptfadapter, tbinfo=tbinfo,',
+            '                              ip_dst=ip_dst, nexthop_devs=nexthop_devs)',
+        ]
+    )
+
+    # 3d. run_static_route_test – post-config-reload: replace ping loop after wait_all_bgp_up
+    replace_block(
+        target,
+        [
+            '            for nexthop_addr in nexthop_addrs:',
+            '                duthost.shell("timeout 1 ping -c 1 -w 1 {}".format(nexthop_addr), module_ignore_errors=True)',
+        ],
+        [
+            '            wait_for_traffic_ready(duthost, prefix, nexthop_addrs, ipv6=ipv6,',
+            '                                  label="run-post-reload",',
+            '                                  ptfadapter=ptfadapter, tbinfo=tbinfo,',
+            '                                  ip_dst=ip_dst, nexthop_devs=nexthop_devs)',
+        ]
+    )
+
+    print("  Patched {} – wait_for_traffic_ready() inserted at 4 traffic test sites".format(target))
 
 
 if __name__ == '__main__':

@@ -720,6 +720,9 @@ def upload_tb_files(data,topo_type,base_topo_file,device_type, lc_topo_code='GG'
         ftp_client.put('sim_patches/tests_mark_conditions_cisco_sim.yaml','golden-code/sonic-test/sonic-mgmt/tests/common/plugins/conditional_mark/tests_mark_conditions_cisco_sim.yaml')
         ftp_client.put('sim_patches/cisco_sim.py','golden-code/sonic-test/sonic-mgmt/tests/common/devices/cisco_sim.py')
         ftp_client.put('sim_patches/cisco_sim_apis_hook.py','golden-code/sonic-test/sonic-mgmt/tests/common/cisco_sim_apis_hook.py')
+        # Static route wait helper – must sit alongside add_sim_hooks.py so that
+        # patch_static_route_wait() can find it via os.path.dirname(__file__)
+        ftp_client.put('sim_patches/test_static_route_wait.py','golden-code/sonic-test/sonic-mgmt/tests/test_static_route_wait.py')
     if bgp_hold_time_patch:
         ftp_client.put('sim_patches/minigraph_cpg.j2','golden-code/sonic-test/sonic-mgmt/ansible/templates/minigraph_cpg.j2')
 
