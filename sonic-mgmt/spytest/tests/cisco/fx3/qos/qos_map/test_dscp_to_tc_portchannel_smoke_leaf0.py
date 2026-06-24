@@ -312,6 +312,30 @@ import pytest
 warnings.filterwarnings(
     "ignore", r".*ssl\.PROTOCOL_TLS is deprecated.*", DeprecationWarning)
 
+# ─── Module-level skip: VxLAN testbeds only ───────────────────────────
+# This entire file is the VxLAN L3VNI portchannel-leaf0 smoke suite and
+# requires the 2-DUT VxLAN VTEP topology.  Abandon the module at import
+# time on non-VxLAN testbeds so the pytest summary shows ONE skip line
+# for the whole file instead of one per parametrized smoke instance.
+# See test_dscp_to_tc_overlay.py for the rationale on using
+# SPYTEST_TESTBED_FILE rather than `_infer_topo_mode()` at module-import
+# time.
+_VXLAN_TESTBEDS = (
+    "fx3_qos_vxlan_testbed.yaml",
+    "fx3_qos_vxlan_testbed_breakout.yaml",
+)
+_TESTBED_FILE = os.path.basename(
+    os.environ.get("SPYTEST_TESTBED_FILE", "") or
+    os.environ.get("TESTBED_FILE", ""))
+if _TESTBED_FILE and _TESTBED_FILE not in _VXLAN_TESTBEDS:
+    pytest.skip(
+        ("VxLAN portchannel-leaf0 smoke tests require a VxLAN testbed "
+         "(fx3_qos_vxlan_testbed.yaml or "
+         "fx3_qos_vxlan_testbed_breakout.yaml); current testbed "
+         "is '{}'.").format(_TESTBED_FILE),
+        allow_module_level=True,
+    )
+
 from spytest import st, tgapi                      # noqa: E402
 
 from qos_helpers import (                           # noqa: E402

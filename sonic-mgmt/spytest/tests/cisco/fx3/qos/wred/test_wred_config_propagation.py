@@ -65,6 +65,9 @@ from qos_helpers import (
 dut = None
 egress_intf = None
 
+_ASIC_WRED_WAIT_RETRIES = 24
+_ASIC_WRED_WAIT_SEC = 5
+
 
 # ── Topology fixture ─────────────────────────────────────────────────────
 
@@ -108,6 +111,23 @@ def _get_asic_db_wred_keys(dut_handle):
         if 'SAI_OBJECT_TYPE_WRED' in line and line.startswith('ASIC_STATE'):
             keys.append(line)
     return keys
+
+
+def _wait_for_asic_db_wred_keys(dut_handle, retries=_ASIC_WRED_WAIT_RETRIES,
+                                wait_sec=_ASIC_WRED_WAIT_SEC):
+    """Wait for WRED SAI object creation after config qos reload/ecnconfig."""
+    for attempt in range(1, retries + 1):
+        keys = _get_asic_db_wred_keys(dut_handle)
+        if keys:
+            if attempt > 1:
+                st.log("  Found WRED key(s) on attempt {}/{}: {}".format(
+                    attempt, retries, keys))
+            return keys
+        if attempt < retries:
+            st.log("  SAI_OBJECT_TYPE_WRED not found yet; waiting {}s "
+                   "({}/{})".format(wait_sec, attempt, retries))
+            st.wait(wait_sec)
+    return []
 
 
 def _get_asic_db_attrs(dut_handle, asic_key):
@@ -168,12 +188,14 @@ def test_config_applied_to_asic_db():
     st.banner("test_config_applied_to_asic_db STARTED")
     fail_msgs = []
 
-    st.log("Step 1: Find SAI_OBJECT_TYPE_WRED keys in ASIC_DB")
-    wred_keys = _get_asic_db_wred_keys(dut)
+    st.log("Step 1: Wait for SAI_OBJECT_TYPE_WRED keys in ASIC_DB")
+    wred_keys = _wait_for_asic_db_wred_keys(dut)
     if not wred_keys:
         st.report_fail('msg',
                        'test_config_applied_to_asic_db FAILED: '
-                       'no SAI_OBJECT_TYPE_WRED key found in ASIC_DB')
+                       'no SAI_OBJECT_TYPE_WRED key found in ASIC_DB '
+                       'after waiting {}s'.format(
+                           _ASIC_WRED_WAIT_RETRIES * _ASIC_WRED_WAIT_SEC))
         return
 
     st.log("  Found WRED key(s): {}".format(wred_keys))
@@ -278,7 +300,7 @@ def test_ecnconfig_set_thresholds():
             "got '{}'".format(new_gmax, gmax_after))
 
     st.log("Step 4: Verify ASIC_DB reflects the change")
-    wred_keys = _get_asic_db_wred_keys(dut)
+    wred_keys = _wait_for_asic_db_wred_keys(dut)
     if wred_keys:
         attrs = _get_asic_db_attrs(dut, wred_keys[0])
         asic_gmax = attrs.get('SAI_WRED_ATTR_GREEN_MAX_THRESHOLD', '(missing)')
@@ -358,7 +380,7 @@ def test_narrowest_wred_zone():
             "got '{}'".format(narrow_gmax, cfg_gmax))
 
     st.log("Step 3: Verify ASIC_DB reflects the narrow zone")
-    wred_keys = _get_asic_db_wred_keys(dut)
+    wred_keys = _wait_for_asic_db_wred_keys(dut)
     if wred_keys:
         attrs = _get_asic_db_attrs(dut, wred_keys[0])
         asic_gmax = attrs.get('SAI_WRED_ATTR_GREEN_MAX_THRESHOLD', '(missing)')

@@ -3169,6 +3169,204 @@ def _parse_show_interfaces_status_speeds(output, intf_list):
     return speeds
 
 
+def _parse_show_interfaces_status_oper(output, intf_list):
+    """Extract {intf: oper_state_lower} from 'show interfaces status' output.
+
+    The SONiC ``show interfaces status`` output has columns (in order):
+    Interface, Lanes, Speed, MTU, FEC, Alias, Vlan, Oper, Admin, Type,
+    [Asym PFC].  We locate the row by interface-name prefix, then look
+    for the two tokens 'up' or 'down' that appear after the Speed/MTU
+    columns; the FIRST one is Oper, the SECOND is Admin.  This is more
+    robust than a fixed column index because some SONiC variants insert
+    or omit the FEC/Alias columns.
+
+    Returns {intf: 'up' | 'down' | ''} -- '' means we could not parse a
+    state for that interface (do not treat as down; treat as unknown).
+    """
+    opers = {}
+    for line in (output or '').splitlines():
+        for intf in intf_list:
+            if intf in opers:
+                continue
+            cols = line.split()
+            # Defensive: the interface name must appear as a standalone
+            # token (otherwise 'Ethernet1_5' would match 'Ethernet1_50').
+            if not cols or cols[0] != intf:
+                continue
+            # Find the Speed column to anchor where Oper starts.
+            speed_idx = -1
+            for i, col in enumerate(cols):
+                if re.match(r'^\d+[GMK]$', col, re.IGNORECASE):
+                    speed_idx = i
+                    break
+            if speed_idx < 0:
+                continue
+            # Walk the remaining columns; the first two 'up'/'down'
+            # tokens are Oper then Admin.
+            state_tokens = []
+            for col in cols[speed_idx + 1:]:
+                lc = col.lower()
+                if lc in ('up', 'down'):
+                    state_tokens.append(lc)
+                    if len(state_tokens) == 2:
+                        break
+            if state_tokens:
+                opers[intf] = state_tokens[0]
+    return opers
+
+
+def get_intf_oper_states(dut_handle, interfaces, retries=4, retry_delay=3):
+    """Return {intf: 'up' | 'down' | 'unknown'} for the given interfaces.
+
+    Polls ``show interfaces status`` up to ``retries`` times to let the
+    link come up after a recent admin enable or QoS reload.  An
+    interface that consistently appears with Oper='down' is reported
+    as 'down'; one we cannot parse at all is reported 'unknown'
+    (treated as 'do not block' by the caller -- only confirmed-down
+    blocks).  Falls back to APPL_DB ``oper_status`` for any interface
+    we still could not parse.
+    """
+    intf_list = list(interfaces)
+    states = {}
+    attempts = max(1, int(retries))
+    for attempt in range(1, attempts + 1):
+        try:
+            output = st.show(dut_handle, "show interfaces status",
+                             skip_tmpl=True) or ''
+        except Exception:
+            output = ''
+        parsed = _parse_show_interfaces_status_oper(output, intf_list)
+        # On each pass, update only the interfaces we have not seen UP
+        # yet -- if we ever see 'up', keep that (transient flaps after
+        # the first observation are not our concern here).
+        for intf, st_val in parsed.items():
+            if states.get(intf) == 'up':
+                continue
+            states[intf] = st_val
+        # Done if every interface is UP.
+        if all(states.get(intf) == 'up' for intf in intf_list):
+            break
+        # Otherwise log and (if attempts remain) sleep + retry.
+        missing_or_down = [i for i in intf_list
+                           if states.get(i) != 'up']
+        st.log("get_intf_oper_states: attempt {}/{}, not-up: {} "
+               "(retrying after {}s)".format(
+                   attempt, attempts, missing_or_down, retry_delay))
+        if attempt < attempts:
+            st.wait(retry_delay)
+
+    # APPL_DB fallback for anything we could not parse at all.
+    unparsed = [i for i in intf_list if i not in states]
+    if unparsed:
+        for intf in unparsed:
+            try:
+                out = st.show(
+                    dut_handle,
+                    'sonic-db-cli APPL_DB HGET "PORT_TABLE:{}" '
+                    '"oper_status"'.format(intf),
+                    skip_tmpl=True, skip_error_check=True) or ''
+            except Exception:
+                out = ''
+            db_val = ''
+            for line in out.splitlines():
+                line = line.strip().lower()
+                if line in ('up', 'down'):
+                    db_val = line
+                    break
+            states[intf] = db_val or 'unknown'
+
+    # Anything still missing -> 'unknown'.
+    for intf in intf_list:
+        states.setdefault(intf, 'unknown')
+    return states
+
+
+def assert_critical_ports_oper_up(dut_handle, port_role_map, dut_label='dut'):
+    """Env-fail-fast guard: env-fail the module if a critical port is DOWN.
+
+    *port_role_map* is a dict ``{'role': 'EthernetX_Y'}`` covering the
+    ports whose data-plane state actually matters for the test (e.g.
+    ingress, egress, peer-link).  We poll oper-state on each, and:
+
+      * If ALL are 'up'                       -> log OK and return.
+      * If any are 'down' (confirmed by
+        show interfaces status AND APPL_DB)   -> env-fail the module
+        with a precise message naming the offending role/interface.
+      * If any are 'unknown'                  -> log a warning and
+        proceed to the ping phase (which will catch a real failure
+        if there is one).
+
+    This is intentionally STRICTER than the ping-retry guard: a port
+    that is oper-down WILL NOT come up just because we wait 30 s, so
+    the cheap pre-flight saves ~50 s vs. waiting for the 3-retry ping
+    loop to time out.
+
+    Honors the same ``QOS_SKIP_TOPO_PING_GUARD`` escape hatch as the
+    ping-retry guard: setting it to 1 demotes the env-fail to a
+    warning (used by operators who know the testbed is fine).
+    """
+    intfs = list(port_role_map.values())
+    if not intfs:
+        return
+    states = get_intf_oper_states(dut_handle, intfs)
+    down_roles = []
+    unknown_roles = []
+    for role, intf in port_role_map.items():
+        st_val = states.get(intf, 'unknown')
+        if st_val == 'down':
+            down_roles.append((role, intf))
+        elif st_val != 'up':
+            unknown_roles.append((role, intf))
+    if unknown_roles:
+        st.warn("assert_critical_ports_oper_up [{}]: could not "
+                "determine oper-state for {} -- ping phase will "
+                "still catch hard failures".format(
+                    dut_label,
+                    ", ".join("{}={}".format(r, i)
+                              for r, i in unknown_roles)))
+    if not down_roles:
+        if not unknown_roles:
+            st.log("assert_critical_ports_oper_up [{}]: all critical "
+                   "ports oper-UP ({})".format(
+                       dut_label,
+                       ", ".join("{}={}".format(r, i)
+                                 for r, i in port_role_map.items())))
+        return
+
+    st.banner("setup_topo: CRITICAL PORT(S) OPER-DOWN on {} -- "
+              "env-failing module before ping phase".format(dut_label))
+    for role, intf in down_roles:
+        st.log("setup_topo: {} role={!r} interface={!r} is Oper=DOWN".format(
+            dut_label, role, intf))
+    st.log("setup_topo: a port whose `show interfaces status` Oper "
+           "column is 'down' has NO physical link -- ARP/ND can never "
+           "resolve, every ping will return 'Destination Host "
+           "Unreachable', and every WRED traffic test will produce "
+           "depth=0.  This is invariably a CABLE or OPTIC issue on "
+           "the testbed, NOT a software bug.")
+    st.log("setup_topo: REMEDY: (1) check the QSFP/SFP transceiver on "
+           "the listed port(s); (2) verify the fiber/DAC cable is "
+           "seated at both ends; (3) `show interfaces transceiver "
+           "presence {}` to confirm the optic is detected; (4) try "
+           "`config interface shutdown {}` then "
+           "`config interface startup {}` to force a link re-train.".format(
+               down_roles[0][1], down_roles[0][1], down_roles[0][1]))
+    st.log("setup_topo: to OVERRIDE this guard (e.g. for config-only "
+           "verification), set QOS_SKIP_TOPO_PING_GUARD=1 before "
+           "re-running.")
+    if _topo_ping_guard_should_env_fail():
+        st.report_env_fail(
+            'msg',
+            "setup_topo: critical ports OPER-DOWN on {}: {}".format(
+                dut_label,
+                ", ".join("{}={}".format(r, i) for r, i in down_roles)))
+        raise RuntimeError(
+            "setup_topo: critical ports OPER-DOWN: {}".format(down_roles))
+    st.warn("setup_topo: QOS_SKIP_TOPO_PING_GUARD set -- oper-down "
+            "env-fail demoted to warning; ping phase will likely also "
+            "fail")
+
+
 def _intf_speeds_from_appl_db(dut_handle, interfaces):
     """Fallback: read port speed (Mbps int) directly from APPL_DB / CONFIG_DB.
 
@@ -4522,6 +4720,16 @@ def compute_fanin_rate_pct(ctx, margin_mbps):
     The margin is used as-is — callers should pre-scale with ``scale_margin``
     when the margin was authored for a different egress speed.
     ctx keys: ingress_speed_mbps, egress_speed_mbps, num_ingress_ports
+
+    Optional ctx keys:
+      * ``fixed_per_port_l2_pct``: if set, IGNORE margin_mbps and pin each
+        ingress port to this fixed L2 percentage of its line rate (the
+        "N ports each at X%" fan-in model; e.g. 50.0 -> 2x50% combined).
+      * ``l1_adjust`` / ``pkt_size``: if l1_adjust is set, divide the
+        resulting rate by the L2 efficiency pkt_size/(pkt_size+20) so the
+        DELIVERED L2 load equals the requested L2 percentage (IXIA
+        rate_percent is an L1 figure).
+
     Clamped to [0.1, 99.0] to stay within IXIA safe operating range.
     """
     ingress = ctx['ingress_speed_mbps']
@@ -4531,9 +4739,32 @@ def compute_fanin_rate_pct(ctx, margin_mbps):
         st.warn("port speed unknown (ingress={}M, egress={}M) — "
                 "defaulting to 50% rate".format(ingress, egress))
         return 50.0
-    target_total = egress + margin_mbps
-    per_port = target_total / float(num_ports)
-    rate = per_port / ingress * 100
+    # Optional FIXED per-port L2 rate model.  When ctx['fixed_per_port_l2_pct']
+    # is set, ignore the (egress + margin) drain model entirely and pin each
+    # ingress port to a fixed L2 percentage of its own line rate.  This is the
+    # "N ingress ports each at X% closing on one egress" fan-in model used by
+    # the solution test_fx3_qos WRED stream (e.g. 2 x 50% L2 -> ~104% combined
+    # after L1 adjustment, mild oversubscription so the egress queue builds).
+    # margin_mbps is unused in this mode (the caller may pass anything).
+    fixed_l2 = ctx.get('fixed_per_port_l2_pct')
+    if fixed_l2 is not None:
+        rate = float(fixed_l2)
+    else:
+        target_total = egress + margin_mbps
+        per_port = target_total / float(num_ports)
+        rate = per_port / ingress * 100
+    # Optional L1 (wire-rate) adjustment.  IXIA rate_percent is an L1
+    # percentage of port bandwidth, but target_total/egress are authored
+    # as L2 (frame) rates.  For small frames the 20 B/frame wire overhead
+    # (8 B preamble + 12 B IFG) makes the delivered L2 rate noticeably
+    # lower than the requested L1 percentage.  When ctx['l1_adjust'] is
+    # set, divide by the L2 efficiency so the delivered L2 load matches
+    # the requested target_total.  Off by default to preserve the
+    # existing (empirically calibrated) behavior for all other callers.
+    if ctx.get('l1_adjust'):
+        pkt_sz = ctx.get('pkt_size', 128)
+        l2_efficiency = float(pkt_sz) / (pkt_sz + 20)
+        rate = rate / l2_efficiency
     if rate > 99.0:
         st.warn("compute_fanin_rate_pct: {:.2f}% exceeds 99% — "
                 "clamping".format(rate))
@@ -6261,6 +6492,28 @@ def setup_topo_common(tgapi_module, target_queue):
         st.error(msg)
         raise RuntimeError(msg)
 
+    # ── Phase 4.5: PRE-FLIGHT oper-state guard ───────────────────────────
+    # A port that is admin-up but oper-DOWN (no link) cannot ever resolve
+    # ARP/ND, so every L3 ping in Phase 5 will time out and burn ~50 s
+    # before the ping-retry guard finally env-fails the module.  Catch
+    # this cheaper here: parse `show interfaces status`, env-fail
+    # immediately if a critical port is oper-down.  Saves ~50 s on
+    # broken cabling, and gives a more actionable error message ("optic
+    # / cable issue on EthernetX_Y" vs "ping failed after 3 retries").
+    #
+    # 'critical' = ports whose data-plane state matters:
+    #   peer_link mode -> ingress_a, ingress_b, egress (peer-link on
+    #                     dut1); peer, egress_ixia (on dut2).
+    #   breakout mode  -> same set as peer_link (dut1 has 1 ingress).
+    #   ixia mode      -> ingress_a, ingress_b, egress (all on dut1).
+    if mode in ('peer_link', 'breakout'):
+        assert_critical_ports_oper_up(dut, port_info, dut_label='dut1')
+        if dut2:
+            assert_critical_ports_oper_up(dut2, dut2_port_info,
+                                          dut_label='dut2')
+    else:
+        assert_critical_ports_oper_up(dut, port_info, dut_label='dut1')
+
     # ── Phase 5: L3 configuration ────────────────────────────────────────
     if mode == 'peer_link':
         _setup_l3_peer_link(dut, dut2, port_info, dut2_port_info,
@@ -6455,15 +6708,23 @@ def _setup_l3_peer_link(dut, dut2, port_info, dut2_port_info,
     st.wait(30)
 
     # Verify connectivity: dut1 -> dut2 (transit), dut2 -> IXIA (egress)
-    _verify_ping(dut, V4_TRANSIT_DUT2_BARE, 'dut1->dut2 transit IPv4')
-    _verify_ping(dut2, IXIA_EGRESS_IP, 'dut2->IXIA egress IPv4')
-    _verify_ping(dut, IXIA_EGRESS_IP, 'dut1->IXIA end-to-end IPv4')
-    _verify_ping(dut, V6_TRANSIT_DUT2_BARE, 'dut1->dut2 transit IPv6',
-                 cmd='ping6')
-    _verify_ping(dut2, IXIA_EGRESS_IP6, 'dut2->IXIA egress IPv6',
-                 cmd='ping6')
-    _verify_ping(dut, IXIA_EGRESS_IP6, 'dut1->IXIA end-to-end IPv6',
-                 cmd='ping6')
+    # Run all 6 pings on the first pass, then retry any that failed
+    # (transient ARP/ND convergence).  If any STILL fail after retries,
+    # env-fail the whole module instead of letting ~15 downstream tests
+    # silently skip / fail with depth=0.
+    ping_specs = [
+        (dut,  V4_TRANSIT_DUT2_BARE, 'dut1->dut2 transit IPv4',   'ping'),
+        (dut2, IXIA_EGRESS_IP,       'dut2->IXIA egress IPv4',    'ping'),
+        (dut,  IXIA_EGRESS_IP,       'dut1->IXIA end-to-end IPv4','ping'),
+        (dut,  V6_TRANSIT_DUT2_BARE, 'dut1->dut2 transit IPv6',   'ping6'),
+        (dut2, IXIA_EGRESS_IP6,      'dut2->IXIA egress IPv6',    'ping6'),
+        (dut,  IXIA_EGRESS_IP6,      'dut1->IXIA end-to-end IPv6','ping6'),
+    ]
+    failed = _verify_pings_with_retry(ping_specs, retries=3, retry_delay=10)
+    if failed:
+        # Env-fails the module by default (raises); demoted to a warning
+        # only if QOS_SKIP_TOPO_PING_GUARD=1 in the environment.
+        _env_fail_for_unreachable_topology(failed)
     st.wait(5)
 
 
@@ -6613,15 +6874,20 @@ def _setup_l3_breakout(dut, dut2, port_info, dut2_port_info,
 
     st.wait(30)
 
-    _verify_ping(dut, V4_TRANSIT_DUT2_BARE, 'dut1->dut2 transit IPv4')
-    _verify_ping(dut2, IXIA_EGRESS_IP, 'dut2->IXIA egress IPv4')
-    _verify_ping(dut, IXIA_EGRESS_IP, 'dut1->IXIA end-to-end IPv4')
-    _verify_ping(dut, V6_TRANSIT_DUT2_BARE, 'dut1->dut2 transit IPv6',
-                 cmd='ping6')
-    _verify_ping(dut2, IXIA_EGRESS_IP6, 'dut2->IXIA egress IPv6',
-                 cmd='ping6')
-    _verify_ping(dut, IXIA_EGRESS_IP6, 'dut1->IXIA end-to-end IPv6',
-                 cmd='ping6')
+    # Same env-fail guard as the peer_link path (see _setup_l3_peer_link
+    # for rationale).  Run all 6 pings, retry transients, env-fail on
+    # persistent failures.
+    ping_specs = [
+        (dut,  V4_TRANSIT_DUT2_BARE, 'dut1->dut2 transit IPv4',   'ping'),
+        (dut2, IXIA_EGRESS_IP,       'dut2->IXIA egress IPv4',    'ping'),
+        (dut,  IXIA_EGRESS_IP,       'dut1->IXIA end-to-end IPv4','ping'),
+        (dut,  V6_TRANSIT_DUT2_BARE, 'dut1->dut2 transit IPv6',   'ping6'),
+        (dut2, IXIA_EGRESS_IP6,      'dut2->IXIA egress IPv6',    'ping6'),
+        (dut,  IXIA_EGRESS_IP6,      'dut1->IXIA end-to-end IPv6','ping6'),
+    ]
+    failed = _verify_pings_with_retry(ping_specs, retries=3, retry_delay=10)
+    if failed:
+        _env_fail_for_unreachable_topology(failed)
     st.wait(5)
 
 
@@ -6684,15 +6950,119 @@ def _teardown_l3_breakout(dut, dut2, port_info, dut2_port_info):
 
 
 def _verify_ping(dut_handle, target, label, cmd='ping'):
-    """Ping helper used during setup to verify connectivity."""
+    """Ping helper used during setup to verify connectivity.
+
+    Returns True on success, False on failure.  Callers in the
+    ``setup_topo_*`` path use this to collect a list of failures and
+    decide whether to env-fail the whole module (see
+    ``_verify_pings_with_retry``); callers in per-test paths (e.g.
+    ``verify_egress_reachable``) historically ignored the return
+    value so the signature change is backwards-compatible.
+    """
     ping_out = st.config(dut_handle, "{} -c 5 -W 2 {}".format(cmd, target),
                          skip_error_check=True)
     ping_str = str(ping_out) if ping_out else ''
     if '0 received' in ping_str or 'Unreachable' in ping_str:
         st.warn("setup_topo: {} ping to {} FAILED".format(label, target))
         dump_l3_diag(dut_handle, target)
-    else:
-        st.log("setup_topo: {} ping to {} OK".format(label, target))
+        return False
+    st.log("setup_topo: {} ping to {} OK".format(label, target))
+    return True
+
+
+def _verify_pings_with_retry(ping_specs, retries=3, retry_delay=10):
+    """Run a list of pings; retry any that fail; return failure list.
+
+    *ping_specs* is a list of ``(dut_handle, target, label, cmd)`` tuples;
+    ``cmd`` defaults to ``'ping'`` if not provided.
+
+    The function ALWAYS runs every ping on the first pass (so the log
+    shows the full topology picture even if the first one fails).
+    Any pings that failed on pass N are re-tried on pass N+1 after a
+    ``retry_delay`` second sleep — this lets transient ARP/ND
+    convergence settle without producing a false env-fail.
+
+    Returns a list of ``label`` strings for pings that STILL failed
+    after all ``retries`` passes.  An empty list means everything
+    converged; the caller should env-fail the module if the list is
+    non-empty (unless QOS_SKIP_TOPO_PING_GUARD env var is set, see
+    ``_topo_ping_guard_should_env_fail``).
+    """
+    # Normalize: pad each spec to 4 elements
+    specs = []
+    for s in ping_specs:
+        if len(s) == 3:
+            specs.append((s[0], s[1], s[2], 'ping'))
+        else:
+            specs.append(tuple(s))
+
+    failed_idx = list(range(len(specs)))
+    for attempt in range(1, retries + 1):
+        if not failed_idx:
+            break
+        if attempt > 1:
+            st.log("setup_topo: retry attempt {} for {} failed ping(s) "
+                   "after {} s settle".format(
+                       attempt, len(failed_idx), retry_delay))
+            st.wait(retry_delay)
+        still_failed = []
+        for i in failed_idx:
+            dut_h, target, label, cmd = specs[i]
+            ok = _verify_ping(dut_h, target, label, cmd=cmd)
+            if not ok:
+                still_failed.append(i)
+        failed_idx = still_failed
+
+    return [specs[i][2] for i in failed_idx]
+
+
+def _topo_ping_guard_should_env_fail():
+    """Env-var escape hatch: an operator who KNOWS the testbed is fine
+    but the setup_topo pings are flaky on this run can export
+    ``QOS_SKIP_TOPO_PING_GUARD=1`` to demote the env-fail back to a
+    warning-only.  Returns True iff the guard should env-fail (i.e.
+    the escape hatch is NOT set).
+    """
+    return os.environ.get('QOS_SKIP_TOPO_PING_GUARD', '').strip() not in (
+        '1', 'true', 'TRUE', 'yes', 'YES')
+
+
+def _env_fail_for_unreachable_topology(failed_labels):
+    """Common env-fail path for both peer_link and breakout setup paths.
+
+    Prints a clear banner, dumps the failure list, and either calls
+    ``st.report_env_fail`` (if the escape hatch is NOT set) or just
+    warns (if it IS set).  ``st.report_env_fail`` raises -- so callers
+    will not return from this function in the env-fail case; tests in
+    the module are marked ENVFAIL.
+    """
+    st.banner("setup_topo: TOPOLOGY UNREACHABLE -- env-failing module")
+    st.log("setup_topo: the following connectivity checks did NOT recover "
+           "after retries:")
+    for lbl in failed_labels:
+        st.log("setup_topo:   FAILED -- {}".format(lbl))
+    st.log("setup_topo: this typically means: (a) the dut1<->dut2 peer "
+           "link is down or its L3 adjacency did not come up; (b) the "
+           "IXIA-facing port on dut2 is down; or (c) IXIA ARP/ND has "
+           "not replied for the egress IP.  WRED data-plane verdicts "
+           "are meaningless on a non-forwarding topology, so the whole "
+           "module is being marked ENVFAIL instead of running ~15 "
+           "tests that will each silently skip with `depth=0`.")
+    st.log("setup_topo: to OVERRIDE this guard and run anyway (e.g. for "
+           "config-only verification on a known-good but ping-flaky "
+           "testbed), set QOS_SKIP_TOPO_PING_GUARD=1 before re-running.")
+    if _topo_ping_guard_should_env_fail():
+        st.report_env_fail(
+            'msg',
+            "setup_topo: connectivity checks failed after retries: {}".format(
+                ', '.join(failed_labels)))
+        # report_env_fail raises; the line below is defensive only.
+        raise RuntimeError(
+            "setup_topo: connectivity checks failed: {}".format(
+                ', '.join(failed_labels)))
+    st.warn("setup_topo: QOS_SKIP_TOPO_PING_GUARD set -- env-fail "
+            "demoted to warning; tests will run on a likely-broken "
+            "topology and most will skip with depth=0")
 
 
 # ── WRED context builder ────────────────────────────────────────────────

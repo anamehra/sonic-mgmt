@@ -85,6 +85,32 @@ warnings.filterwarnings(
 warnings.filterwarnings(
     "ignore", r".*ssl\.PROTOCOL_TLS is deprecated.*", DeprecationWarning)
 
+# ─── Module-level skip: VxLAN testbeds only ───────────────────────────
+# Every test in this file requires a 2-DUT VxLAN VTEP topology
+# (peer_link or breakout).  On non-VxLAN testbeds (e.g. single-DUT
+# fx3_qos_testbed.yaml) we abandon the module at import time so the
+# pytest summary shows ONE skip line for the whole file instead of one
+# per parametrized test item.
+#
+# We key off the testbed file basename rather than `_infer_topo_mode()`
+# because that helper calls `st.get_testbed_vars()`, which is not safe to
+# invoke at module-import time before spytest has loaded the testbed.
+_VXLAN_TESTBEDS = (
+    "fx3_qos_vxlan_testbed.yaml",
+    "fx3_qos_vxlan_testbed_breakout.yaml",
+)
+_TESTBED_FILE = os.path.basename(
+    os.environ.get("SPYTEST_TESTBED_FILE", "") or
+    os.environ.get("TESTBED_FILE", ""))
+if _TESTBED_FILE and _TESTBED_FILE not in _VXLAN_TESTBEDS:
+    pytest.skip(
+        ("VxLAN overlay tests require a VxLAN testbed "
+         "(fx3_qos_vxlan_testbed.yaml or "
+         "fx3_qos_vxlan_testbed_breakout.yaml); current testbed "
+         "is '{}'.").format(_TESTBED_FILE),
+        allow_module_level=True,
+    )
+
 from spytest import st, tgapi
 
 from qos_helpers import (
