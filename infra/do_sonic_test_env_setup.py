@@ -5,8 +5,15 @@ import subprocess
 import shutil
 import logging
 import json
+import stat
+import tempfile
 import textwrap
-from typing import Dict, Optional
+from typing import Dict
+
+# Environment variable names for CI/CD secret injection
+ENV_GIT_TOKEN = "CICD_GIT_TOKEN"
+ENV_GIT_USER = "CICD_GIT_USER"
+ENV_SUDO_PASSWORD = "CICD_UCS_SUDO_PASSWORD"
 
 # Standard directory name for the SONiC test workspaces
 SONIC_WORKSPACES_DIR = "sonic_test_workspaces"
@@ -54,6 +61,32 @@ class SonicTestEnvSetup:
         command = getattr(args, 'command', 'unknown')
         subcommand = getattr(args, 'subcommand', '')
         self.logger.info(f"Initialized SonicTestEnvSetup. Command: {command} {subcommand}")
+
+    @staticmethod
+    def _resolve_secret(env_var_name: str, label: str) -> str:
+        """
+        Reads a secret from an environment variable.
+
+        Secrets always live in env vars by the time this method is called:
+        either set directly (CI/CD) or moved there from CLI args by
+        _sanitize_process_args() before execution begins.
+
+        Raises SystemExit with a clear message if the variable is not set.
+
+        Args:
+            env_var_name: Name of the environment variable to read.
+            label: Human-readable label for error messages (e.g. "Git token").
+
+        Returns:
+            The secret string.
+        """
+        if value := os.environ.get(env_var_name):
+            return value
+        logging.getLogger(__name__).error(
+            f"{label} not provided. Supply --{label.lower().replace(' ', '_')} or "
+            f"set the {env_var_name} environment variable."
+        )
+        sys.exit(1)
 
     # ==============================================================================
     # Shared Helper Methods
@@ -196,8 +229,11 @@ class SonicTestEnvSetup:
         """
         Configures /etc/apt/apt.conf using sudo.
         Strictly adds only HTTP and HTTPS proxies.
+        Password is passed via stdin to avoid exposure in process listings.
         """
         self.logger.info("Configuring APT proxies in /etc/apt/apt.conf...")
+
+        sudo_password = self._resolve_secret(ENV_SUDO_PASSWORD, "sudo_password")
 
         proxy_settings = self.args.proxy if self.args.proxy else UCS_PROXY_DEFAULTS
 
@@ -210,25 +246,36 @@ class SonicTestEnvSetup:
 
         config_content = "\n".join(lines) + "\n"
 
-        # Write using sudo
-        # We use a shell command with sudo -S to handle the redirection and password securely
-        full_cmd = f"echo '{self.args.sudo_password}' | sudo -S bash -c 'cat > /etc/apt/apt.conf <<EOF\n{config_content}EOF'"
-
+        # Write config to a temp file first, then use sudo cp to place it.
+        # This avoids mixing the sudo password and file content on the same stdin.
+        tmp_fd = None
+        tmp_path = None
         try:
-            # Mask password for logging
             self.logger.info("Executing sudo command to write /etc/apt/apt.conf")
 
+            tmp_fd, tmp_path = tempfile.mkstemp(prefix="apt_conf_", suffix=".tmp")
+            with os.fdopen(tmp_fd, 'w') as f:
+                tmp_fd = None  # os.fdopen takes ownership of the fd
+                f.write(config_content)
+
             subprocess.run(
-                full_cmd,
-                shell=True,
+                ["sudo", "-S", "-p", "", "install", "-m", "0644", tmp_path, "/etc/apt/apt.conf"],
+                input=f"{sudo_password}\n",
+                text=True,
                 check=True,
-                executable="/bin/bash"
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
             )
             self.logger.info("Successfully updated /etc/apt/apt.conf with HTTP/HTTPS proxies.")
 
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Failed to configure APT proxies: {e}")
             raise
+        finally:
+            if tmp_fd is not None:
+                os.close(tmp_fd)
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     def _setup_veos_image(self):
         """
@@ -278,7 +325,8 @@ class SonicTestEnvSetup:
 
         try:
             # Run the command, passing the password securely via stdin
-            password_input = f"{self.args.sudo_password}\n"
+            sudo_password = self._resolve_secret(ENV_SUDO_PASSWORD, "sudo_password")
+            password_input = f"{sudo_password}\n"
 
             result = subprocess.run(
                 cmd,
@@ -305,7 +353,8 @@ class SonicTestEnvSetup:
         self.logger.info("Applying CPU soft lockup workaround (watchdog_thresh=20)...")
 
         config_file = "/etc/sysctl.d/99-watchdog_thresh.conf"
-        password_input = f"{self.args.sudo_password}\n"
+        sudo_password = self._resolve_secret(ENV_SUDO_PASSWORD, "sudo_password")
+        password_input = f"{sudo_password}\n"
 
         try:
             # 1. Write configuration
@@ -398,9 +447,13 @@ class SonicTestEnvSetup:
     def _setup_git_repository(self):
         """
         Clones the Git repository into the specific workspace directory.
-        Handles URL construction with authentication tokens.
-        SECURITY: Immediately updates the git remote URL to remove the token after cloning.
+        SECURITY: Uses GIT_ASKPASS so the token never appears in process arguments.
+        Immediately updates the git remote URL to remove credentials after cloning.
         """
+        # Resolve secrets from env vars
+        git_user = self._resolve_secret(ENV_GIT_USER, "git_user")
+        git_token = self._resolve_secret(ENV_GIT_TOKEN, "git_token")
+
         # Target directory: ~/sonic_test_workspaces/{workspace_name}
         parent_dir = os.path.expanduser(f"~/{SONIC_WORKSPACES_DIR}/{self.args.workspace_name}")
         
@@ -417,24 +470,41 @@ class SonicTestEnvSetup:
         # Clean the input URL: remove 'https://' or 'http://' if present
         clean_url_body = self.args.git_repo_url.replace("https://", "").replace("http://", "")
         
-        # URL for Cloning (With Token)
-        auth_url = f"https://{self.args.git_user}:{self.args.git_token}@{clean_url_body}"
+        # URL for Cloning (username only — token supplied via GIT_ASKPASS)
+        clone_url = f"https://{git_user}@{clean_url_body}"
         
         # URL for Remote Config (Clean, No Token)
         final_clean_url = f"https://{clean_url_body}"
 
         # Masked URL for logging
-        masked_url = f"https://{self.args.git_user}:<HIDDEN_TOKEN>@{clean_url_body}"
+        masked_url = f"https://{git_user}:<HIDDEN_TOKEN>@{clean_url_body}"
 
-        # 3. Clone Repository
+        # 3. Create a temporary GIT_ASKPASS helper script
+        # The script reads the token from an env var so no credential is written to disk.
+        askpass_fd = None
+        askpass_path = None
+        _askpass_token_var = "_GIT_ASKPASS_TOKEN"
         try:
+            askpass_fd, askpass_path = tempfile.mkstemp(prefix="git_askpass_", suffix=".sh")
+            with os.fdopen(askpass_fd, 'w') as f:
+                askpass_fd = None  # os.fdopen takes ownership of the fd
+                f.write(f"#!/bin/sh\nprintf '%s\\n' \"${_askpass_token_var}\"\n")
+            os.chmod(askpass_path, stat.S_IRWXU)  # owner rwx only
+
+            # 4. Clone Repository
             self.logger.info(f"Cloning branch '{self.args.git_branch}' from {masked_url}...")
             
-            cmd = ["git", "clone", "-b", self.args.git_branch, auth_url]
+            clone_env = os.environ.copy()
+            clone_env["GIT_ASKPASS"] = askpass_path
+            clone_env["GIT_TERMINAL_PROMPT"] = "0"
+            clone_env[_askpass_token_var] = git_token
+
+            cmd = ["git", "clone", "-b", self.args.git_branch, clone_url]
             
             subprocess.run(
                 cmd,
                 cwd=parent_dir,
+                env=clone_env,
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -442,7 +512,7 @@ class SonicTestEnvSetup:
             )
             self.logger.info("Repository cloned successfully.")
 
-            # 4. Redact Token from Remote URL
+            # 5. Redact credentials from Remote URL
             # We need to find the specific folder git created to run the git config command inside it.
             # Usually it's the last part of the URL.
             repo_name = clean_url_body.split('/')[-1]
@@ -469,6 +539,13 @@ class SonicTestEnvSetup:
         except Exception as e:
             self.logger.error(f"An unexpected error occurred during git setup: {e}")
             raise
+        finally:
+            # Always clean up the askpass helper script
+            if askpass_fd is not None:
+                os.close(askpass_fd)
+            if askpass_path and os.path.exists(askpass_path):
+                os.remove(askpass_path)
+                self.logger.info("Cleaned up temporary GIT_ASKPASS helper.")
 
     def _manage_docker_image(self):
         """
@@ -595,7 +672,7 @@ class SonicTestEnvSetup:
             raise
 
         # Determine Log Mount Dir
-        log_mount = self.args.container_log_mount_dir if self.args.container_log_mount_dir else os.path.expanduser("~/test_logs")
+        log_mount = os.path.expanduser(self.args.container_log_mount_dir if self.args.container_log_mount_dir else "~/test_logs")
 
         # Construct Docker Run Command
         cmd = [
@@ -646,6 +723,8 @@ class SonicTestEnvSetup:
         """
         if self.args.command == "ucs":
             if self.args.subcommand == "setup_proxy":
+                # Validate sudo secret before any host changes (e.g. .bashrc rewrite)
+                self._resolve_secret(ENV_SUDO_PASSWORD, "sudo_password")
                 self._configure_ucs_proxies()
             elif self.args.subcommand == "setup_veos_image":
                 self._setup_veos_image()
@@ -658,6 +737,10 @@ class SonicTestEnvSetup:
 
         elif self.args.command == "sonic_test_env":
             if self.args.subcommand == "create":
+                # Validate git secrets before any destructive actions (workspace removal)
+                self._resolve_secret(ENV_GIT_USER, "git_user")
+                self._resolve_secret(ENV_GIT_TOKEN, "git_token")
+
                 # Ensure proxies are set for current execution (only relevant for 'create')
                 container_proxies = self.args.container_proxy if self.args.container_proxy else SONIC_MGMT_CONTAINER_PROXY_DEFAULTS
                 for key, value in container_proxies.items():
@@ -665,10 +748,19 @@ class SonicTestEnvSetup:
                     os.environ[key.upper()] = value
 
                 # Execute Setup Sequence (Clean -> Git -> Image -> Launch)
+                # On failure, attempt to clean up the partially-created workspace.
                 self._remove_workspace_resources()
-                self._setup_git_repository()
-                self._manage_docker_image()
-                self._launch_sonic_mgmt_container()
+                try:
+                    self._setup_git_repository()
+                    self._manage_docker_image()
+                    self._launch_sonic_mgmt_container()
+                except Exception:
+                    self.logger.error("Workspace creation failed. Cleaning up partially-created resources...")
+                    try:
+                        self._remove_workspace_resources()
+                    except Exception as cleanup_err:
+                        self.logger.error(f"Cleanup also failed: {cleanup_err}")
+                    raise
 
             elif self.args.subcommand == "remove":
                 # Execute Removal Only
@@ -678,17 +770,17 @@ def parse_arguments():
     """
     Parses command line arguments with nested subcommands structure.
     """
-    parser = argparse.ArgumentParser(description="SONiC Test Environment Setup Automation")
+    parser = argparse.ArgumentParser(description="SONiC Test Environment Setup Automation", allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="command", required=True, help="Main command")
 
     # ==========================================
     # Command 1: ucs (Host Configuration)
     # ==========================================
-    parser_ucs = subparsers.add_parser("ucs", help="Configure UCS Host (proxies, workarounds, docker images, veos images)")
+    parser_ucs = subparsers.add_parser("ucs", help="Configure UCS Host (proxies, workarounds, docker images, veos images)", allow_abbrev=False)
     ucs_subparsers = parser_ucs.add_subparsers(dest="subcommand", required=True, help="UCS Setup Subcommands")
 
     # 1.a setup_proxy
-    parser_proxy = ucs_subparsers.add_parser("setup_proxy", help="Configure UCS Host Proxies (.bashrc and /etc/apt/apt.conf)")
+    parser_proxy = ucs_subparsers.add_parser("setup_proxy", help="Configure UCS Host Proxies (.bashrc and /etc/apt/apt.conf)", allow_abbrev=False)
     parser_proxy.add_argument(
         "--proxy",
         required=False, 
@@ -697,12 +789,13 @@ def parse_arguments():
     )
     parser_proxy.add_argument(
         "--sudo_password",
-        required=True,
-        help="Sudo password for writing to /etc/apt/apt.conf"
+        required=False,
+        default=None,
+        help=f"Sudo password for writing to /etc/apt/apt.conf. Falls back to {ENV_SUDO_PASSWORD} env var."
     )
 
     # 1.b setup_veos_image
-    parser_veos = ucs_subparsers.add_parser("setup_veos_image", help="Download vEOS image to UCS and put them into ~/veos-vm/images")
+    parser_veos = ucs_subparsers.add_parser("setup_veos_image", help="Download vEOS image to UCS and put them into ~/veos-vm/images", allow_abbrev=False)
     parser_veos.add_argument(
         "--image_url",
         required=True, 
@@ -710,7 +803,7 @@ def parse_arguments():
     )
 
     # 1.c load_docker_image
-    parser_docker = ucs_subparsers.add_parser("load_docker_image", help="Download and load an arbitrary Docker image")
+    parser_docker = ucs_subparsers.add_parser("load_docker_image", help="Download and load an arbitrary Docker image", allow_abbrev=False)
     parser_docker.add_argument(
         "--image_url",
         required=True, 
@@ -718,34 +811,36 @@ def parse_arguments():
     )
 
     # 1.d apply_intel_driver_workaround
-    parser_intel = ucs_subparsers.add_parser("apply_intel_driver_workaround", help="Apply Intel i40e LLDP workaround")
+    parser_intel = ucs_subparsers.add_parser("apply_intel_driver_workaround", help="Apply Intel i40e LLDP workaround", allow_abbrev=False)
     parser_intel.add_argument(
         "--sudo_password",
-        required=True,
-        help="Sudo password for the UCS user"
+        required=False,
+        default=None,
+        help=f"Sudo password for the UCS user. Falls back to {ENV_SUDO_PASSWORD} env var."
     )
 
     # 1.e apply_cpu_softlock_workaround
-    parser_cpu = ucs_subparsers.add_parser("apply_cpu_softlock_workaround", help="Apply CPU soft lockup workaround")
+    parser_cpu = ucs_subparsers.add_parser("apply_cpu_softlock_workaround", help="Apply CPU soft lockup workaround", allow_abbrev=False)
     parser_cpu.add_argument(
         "--sudo_password",
-        required=True,
-        help="Sudo password for the UCS user"
+        required=False,
+        default=None,
+        help=f"Sudo password for the UCS user. Falls back to {ENV_SUDO_PASSWORD} env var."
     )
 
     # ==========================================
     # Command 2: sonic_test_env (Workspace Management)
     # ==========================================
-    parser_env = subparsers.add_parser("sonic_test_env", help="Manage SONiC Test Workspaces (Create/Remove)")
+    parser_env = subparsers.add_parser("sonic_test_env", help="Manage SONiC Test Workspaces (Create/Remove)", allow_abbrev=False)
     env_subparsers = parser_env.add_subparsers(dest="subcommand", required=True, help="Workspace Actions")
 
     # 2.a create (Create/Setup Workspace)
-    parser_create = env_subparsers.add_parser("create", help="Create and setup a new SONiC test workspace")
+    parser_create = env_subparsers.add_parser("create", help="Create and setup a new SONiC test workspace", allow_abbrev=False)
     parser_create.add_argument("--workspace_name", required=True, help="Unique identifier for the workspace. Used for directory name (~/sonic_test_workspaces/{workspace_name}) and container name.")
     parser_create.add_argument("--git_repo_url", default="wwwin-github.cisco.com/whitebox/sonic-test", help="Git repo URL")
     parser_create.add_argument("--git_branch", required=True, help="Git branch to clone")
-    parser_create.add_argument("--git_user", required=True, help="Git username")
-    parser_create.add_argument("--git_token", required=True, help="Git access token")
+    parser_create.add_argument("--git_user", required=False, default=None, help=f"Git username. Falls back to {ENV_GIT_USER} env var.")
+    parser_create.add_argument("--git_token", required=False, default=None, help=f"Git access token. Falls back to {ENV_GIT_TOKEN} env var.")
     parser_create.add_argument("--sonic_mgmt_image_url", required=True, help="URL to sonic-mgmt docker image")
     parser_create.add_argument("--sonic_mgmt_image_tag", default="latest", help="sonic mgmt docker image tag")
     parser_create.add_argument("--container_log_mount_dir", help="Log mount path (defaults to ~/test_logs if not set)")
@@ -757,7 +852,7 @@ def parse_arguments():
     )
 
     # 2.b remove (Delete Workspace)
-    parser_remove = env_subparsers.add_parser("remove", help="Remove an existing workspace (Container and Directory)")
+    parser_remove = env_subparsers.add_parser("remove", help="Remove an existing workspace (Container and Directory)", allow_abbrev=False)
     parser_remove.add_argument(
         "--workspace_name",
         required=True,
@@ -766,14 +861,142 @@ def parse_arguments():
 
     return parser.parse_args()
 
+# ==============================================================================
+# Process Command-Line Secret Sanitization
+# ==============================================================================
+
+# Sentinel env var — when set, the current process is the re-exec'd (clean) one
+_SANITIZED_MARKER = "_SONIC_SETUP_ARGS_SANITIZED"
+
+# CLI arg name  →  target env var
+_SECRET_ARGS = {
+    "--git_token": ENV_GIT_TOKEN,
+    "--git_user": ENV_GIT_USER,
+    "--sudo_password": ENV_SUDO_PASSWORD,
+}
+
+
+def _sanitize_process_args():
+    """
+    Prevents secrets from appearing in ``ps aux`` / ``/proc/<pid>/cmdline``.
+
+    When a user passes secrets as CLI arguments (e.g. ``--git_token <value>``),
+    the entire command line — including those secrets — is visible to every user
+    on the system via ``ps aux``.
+
+    This function:
+      1. Scans ``sys.argv`` for known secret arguments.
+      2. Moves their values into environment variables (env vars are
+         per-process and NOT visible in ``ps aux``).
+      3. Re-executes the script via ``os.execv`` with a **clean** argv
+         that no longer contains the secrets.
+
+    A sentinel environment variable (_SONIC_SETUP_ARGS_SANITIZED) is set before
+    re-exec to guarantee the function is a no-op on the second invocation and
+    to prevent infinite loops.
+
+    If no secret CLI arguments are detected, no re-exec happens and the
+    function returns immediately.
+    """
+    # Already re-exec'd — nothing to do
+    if os.environ.get(_SANITIZED_MARKER):
+        return
+
+    clean_argv = []
+    skip_next = False
+    secrets_found = False
+
+    for i, arg in enumerate(sys.argv):
+        if skip_next:
+            skip_next = False
+            continue
+
+        # --secret_name value  (space-separated)
+        if arg in _SECRET_ARGS:
+            if i + 1 < len(sys.argv):
+                os.environ[_SECRET_ARGS[arg]] = sys.argv[i + 1]
+                skip_next = True
+                secrets_found = True
+            # else: missing value — let argparse report the error after re-exec
+            continue  # always drop the arg name from clean_argv
+
+        # --secret_name=value  (equals-separated)
+        found_eq = False
+        for secret_arg, env_var in _SECRET_ARGS.items():
+            if arg.startswith(f"{secret_arg}="):
+                os.environ[env_var] = arg.split("=", 1)[1]
+                secrets_found = True
+                found_eq = True
+                break
+
+        if not found_eq:
+            clean_argv.append(arg)
+
+    if not secrets_found:
+        return
+
+    # Mark as sanitized so the next invocation is a no-op
+    os.environ[_SANITIZED_MARKER] = "1"
+
+    # Build the full interpreter command.
+    # sys.orig_argv (Python 3.10+) preserves interpreter flags like -u, -O, etc.
+    # Fall back to [sys.executable] + clean_argv for older versions.
+    if hasattr(sys, "orig_argv"):
+        # orig_argv = ['python3', '-u', 'script.py', ...args...]
+        # Replace everything from the script path onward with clean_argv.
+        script_name = sys.argv[0]
+        try:
+            idx = sys.orig_argv.index(script_name)
+            interp_prefix = sys.orig_argv[:idx]
+        except ValueError:
+            interp_prefix = [sys.executable]
+        exec_argv = interp_prefix + clean_argv
+    else:
+        exec_argv = [sys.executable] + clean_argv
+
+    os.execvp(exec_argv[0], exec_argv)
+
+# ==============================================================================
+# All env vars that may contain secrets and should be cleaned up after execution
+# ==============================================================================
+_SECRET_ENV_VARS = [ENV_GIT_TOKEN, ENV_GIT_USER, ENV_SUDO_PASSWORD, _SANITIZED_MARKER]
+
+
 def main():
+    # Strip secrets from the process command line before anything else.
+    # After this call, secrets (if any were on the CLI) live only in env vars.
+    _sanitize_process_args()
+
     # Check if no arguments were provided
     if len(sys.argv) == 1:
         help_msg = """
             ==============================================================================
             SONiC Test Environment Setup Script
             ==============================================================================
-            Usage Examples:
+
+            Secret Handling (CI/CD & Manual):
+            ---------------------------------
+            Secrets can be provided via CLI arguments OR environment variables.
+            CLI arguments take priority; env vars are used as fallback.
+
+              --sudo_password  /  CICD_UCS_SUDO_PASSWORD
+              --git_user       /  CICD_GIT_USER
+              --git_token      /  CICD_GIT_TOKEN
+
+            When secrets are passed as CLI arguments, the script automatically
+            moves them into environment variables and re-executes itself with a
+            clean command line so that secrets never appear in ``ps aux``.
+
+            CI/CD example (secrets in env vars, nothing on the command line):
+              export CICD_UCS_SUDO_PASSWORD="..."
+              export CICD_GIT_USER="..."
+              export CICD_GIT_TOKEN="..."
+              python3 do_sonic_test_env_setup.py ucs setup_proxy
+              python3 do_sonic_test_env_setup.py sonic_test_env create \\
+                  --workspace_name "cicd_prod_202505" --git_branch "master" \\
+                  --sonic_mgmt_image_url "http://..."
+
+            Usage Examples (Manual):
 
             1. UCS Host Setup (One-time or Maintenance):
                -----------------------------------------
@@ -813,9 +1036,14 @@ def main():
 
     args = parse_arguments()
 
-    # Initialize and run
-    automation = SonicTestEnvSetup(args)
-    automation.run()
+    try:
+        # Initialize and run
+        automation = SonicTestEnvSetup(args)
+        automation.run()
+    finally:
+        # Clean up secret env vars so they don't linger in the process environment
+        for env_var in _SECRET_ENV_VARS:
+            os.environ.pop(env_var, None)
 
 if __name__ == "__main__":
     main()
