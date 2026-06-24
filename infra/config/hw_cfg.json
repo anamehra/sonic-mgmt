@@ -2267,7 +2267,9 @@
                 ]
             },
             "spytest_container_202511": "spytest-platform-hardening-202511",
-            "spytest_file_base_202511": "202511"
+            "spytest_file_base_202511": "202511",
+            "spytest_container_202605": "spytest-platform-hardening-202605",
+            "spytest_file_base_202605": "202605"
         },
         "t2-m6-30-titan": {
             "ucs_host_name": "sonic-TTAN-ucs-m6-30",
@@ -2743,7 +2745,9 @@
             "cisco.202505.1.signed"
         ],
         "lightning-spytest-plat": [
-            "cisco.202505.1.signed"
+            "cisco.202505.1.signed",
+            "cisco.202511.1.signed",
+            "cisco.202605.signed"
         ],
         "arctos-spytest-plat": [
             "cisco.202505.1.signed"
