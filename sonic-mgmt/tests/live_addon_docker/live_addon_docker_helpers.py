@@ -9,7 +9,8 @@ The JSON must define ``vendor``, ``docker_run`` (``docker load`` if needed, then
 ``docker-live-addon-<vendor>[:tag]`` unless set explicitly (must match ACR repo for registry pull).
 Optional fields: ``tarball_filename``, ``version_matrix``, ``candidate_image_refs``.
 Registry pull uses Ansible ``docker_registry_*`` or pytest ``--live_addon_docker_registry``;
-``--live_addon_docker_image_tag`` overrides pull/run tag. ``--public_docker_registry`` for public host.
+``--live_addon_docker_image_tag`` overrides pull/run tag for baseline and module tests.
+``--live_addon_docker_image_upgrade_tag`` is upgrade-test only. ``--public_docker_registry`` for public host.
 Optional ``version_matrix`` skips when live-addon vs DUT SONiC is not declared compatible
 (see ``require_version_matrix_or_skip``).
 """
@@ -1266,6 +1267,53 @@ def wait_for_health_ready(duthost, health_cfg):
     polled = wait_until(timeout, interval, 0, _probe)
     pytest_assert(polled, "Health endpoint did not return expect_http_code within {} s".format(timeout))
     return last
+
+
+def upgrade_live_addon_docker_image(
+    duthost,
+    cfg,
+    public_docker_registry=False,
+    docker_registry_host_override=None,
+):
+    """
+    Upgrade path: teardown container, remove configured images, registry-pull
+    ``cfg['docker_run']['image_ref']``, ``docker run``, post-start checks, HTTP health.
+
+    Call ``apply_image_tag_to_config`` first (baseline ``--live_addon_docker_image_tag`` or upgrade
+    ``--live_addon_docker_image_upgrade_tag``).
+    Returns ``(cfg_used, (ok, http_code, body))``.
+    """
+    dr = cfg.get("docker_run") or {}
+    if not dr.get("image_ref"):
+        pytest.fail("upgrade_live_addon_docker_image: docker_run.image_ref is required")
+
+    docker_manual_teardown(duthost, dr)
+    remove_configured_live_addon_images(duthost, cfg)
+
+    tag = image_ref_to_tag(dr["image_ref"])
+    reg_settings = _live_addon_registry_pull_settings(cfg, registry_image_tag=tag)
+    if reg_settings is None:
+        pytest.fail("upgrade_live_addon_docker_image: cannot build registry pull settings")
+
+    ref = try_registry_pull_live_addon_image(
+        duthost,
+        reg_settings,
+        public_docker_registry=public_docker_registry,
+        docker_registry_host_override=docker_registry_host_override,
+    )
+    if not ref:
+        pytest.fail(
+            "upgrade_live_addon_docker_image: registry pull failed for {!r} "
+            "(registry_host_override={!r})".format(dr["image_ref"], docker_registry_host_override)
+        )
+
+    cfg_run = copy.deepcopy(cfg)
+    cfg_run["docker_run"]["image_ref"] = ref
+    require_version_matrix_or_skip(duthost, cfg, ref)
+    docker_run_manual(duthost, cfg_run)
+    verify_live_addon_post_start(duthost, cfg_run)
+    health = wait_for_health_ready(duthost, cfg_run["health"])
+    return cfg_run, health
 
 
 def docker_manual_teardown(duthost, docker_run_cfg):

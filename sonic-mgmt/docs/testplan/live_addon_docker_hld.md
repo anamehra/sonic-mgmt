@@ -136,11 +136,14 @@ flowchart TD
 Registry host comes from Ansible `docker_registry_host` or pytest `live_addon_docker_registry`
 (see §7). Tarball path on the DUT is `dut_tarball_home` plus `tarball_filename` from JSON.
 
-**Pull tag selection:**
+**Pull tag selection (module / baseline tests):**
 
-1. `--live_addon_docker_image_tag` if set (CI build id)
+1. `--live_addon_docker_image_tag` if set (baseline / CI build id)
 2. Else tag from `docker_run.image_ref` when not `latest`
 3. Else `duthost.os_version` (same convention as syncd-rpc / `swap_syncd`)
+
+**Image upgrade test** uses `--live_addon_docker_image_tag` for baseline and
+`--live_addon_docker_image_upgrade_tag` for the upgrade pull (both required).
 
 ## 7. Pytest CLI parameters
 
@@ -149,10 +152,11 @@ Registry host comes from Ansible `docker_registry_host` or pytest `live_addon_do
 | `--live-addon-docker-config` | Override path to vendor JSON |
 | `--live-addon-docker-tarball` | Path to `.gz` on the test runner |
 | `--live_addon_docker_registry` | Registry host for pull (overrides Ansible `docker_registry_host` for this module) |
-| `--live_addon_docker_image_tag` | Image tag for pull and `docker_run.image_ref` |
+| `--live_addon_docker_image_tag` | Baseline / module tests: image tag for registry pull and `docker_run.image_ref` |
+| `--live_addon_docker_image_upgrade_tag` | Upgrade test only: target image tag after baseline |
 | `--public_docker_registry` | Use `public_docker_registry_host` without login (same as `swap_syncd`) |
 
-**Example via `run_tests.sh`:**
+**Example via `run_tests.sh` (module tests):**
 
 ```bash
 cd tests
@@ -162,7 +166,15 @@ cd tests
   -t any \
   -c live_addon_docker/test_live_addon_docker.py \
   -i ../ansible/veos \
-  -e "--live_addon_docker_registry=myacr.azurecr.io --live_addon_docker_image_tag=kube-20260527-202505-amd64"
+  -e "--live_addon_docker_registry=myacr.azurecr.io --live_addon_docker_image_tag=baseline-build-001"
+```
+
+**Example (upgrade test):**
+
+```bash
+-e "--live_addon_docker_registry=<ucs-ip>:5000 --public_docker_registry \
+    --live_addon_docker_image_tag=baseline-build-001 \
+    --live_addon_docker_image_upgrade_tag=new-build-002"
 ```
 
 Each vendor or MSFT can point at their own container registry without sharing tarballs.
@@ -279,7 +291,31 @@ Example:
 ]
 ```
 
-## 10. Adding a new vendor / ASIC
+## 10. Test cases
+
+Post-start validation is **not** duplicated in pytest cases; it runs in the fixture and inside
+`run_config_reload_live_addon_start_reload_health` on each `docker run`.
+
+| Test | Validates |
+|------|-----------|
+| `test_live_addon_docker_health_http` | HTTP `/health` returns expected status within probe timeout |
+| `test_live_addon_docker_health_after_config_reload_cycle` | Stop container → `config reload` → wait 60s → `docker run` + full post-start → `config reload` → teardown + `docker run` + restart post-start (120s supervisord) → HTTP health |
+| `test_live_addon_docker_image_upgrade` | Registry pull baseline (`--live_addon_docker_image_tag`) → post-start + health → pull upgrade (`--live_addon_docker_image_upgrade_tag`) → post-start + health (standalone; skips without both CLI tags) |
+
+**Module fixture** `live_addon_docker_setup_teardown`: install once per module, `docker run`,
+`verify_live_addon_post_start` (full readiness), yield `(duthost, cfg)`, then teardown and
+post-teardown checks.
+
+**Image upgrade test** uses `live_addon_docker_vendor_cfg_raw` and requires
+`--live_addon_docker_image_tag`, `--live_addon_docker_image_upgrade_tag`, and registry access.
+Each step calls `upgrade_live_addon_docker_image` (teardown, `docker rmi`, registry pull,
+`docker run`, post-start, HTTP health).
+
+**Typical runtime (Cisco):** first start may wait up to **900s** for startup logs; config-reload
+cycle adds another full post-start plus a **120s** supervisord poll on restart; upgrade test runs
+two full install cycles; HTTP health polls up to **900s** when needed.
+
+## 11. Adding a new vendor / ASIC
 
 1. Add `tests/live_addon_docker/files/<asic_type>_live_addon_docker.json`.
 2. Set `vendor`, `docker_run.container_name`, `health` port/path, and vendor-specific `cli_args` mounts.
@@ -287,7 +323,7 @@ Example:
 4. Extend `tests_mark_conditions_live_addon_docker.yaml` if the ASIC should not be skipped.
 5. Run with `--live_addon_docker_registry` pointing at the vendor CR.
 
-## 11. Assumptions and constraints
+## 12. Assumptions and constraints
 
 - DUT has Docker and network access to the chosen registry (or a pre-staged image/tarball).
 - Registry credentials come from Ansible `docker_registry_*` in testbed creds unless overridden by CLI.
