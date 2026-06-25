@@ -482,6 +482,8 @@ class TestQosSai(QosSaiBase):
         if 'cell_size' in list(qosConfig[xoffProfile].keys()):
             testParams["cell_size"] = qosConfig[xoffProfile]["cell_size"]
 
+        self.set_test_params_descriptor_size(dutQosConfig, testParams)
+
         self.runPtfTest(
             ptfhost, testCase="sai_qos_tests.PFCtest", testParams=testParams
         )
@@ -560,6 +562,8 @@ class TestQosSai(QosSaiBase):
             testParams["packet_size"] = qosConfig[xonProfile]["packet_size"]
         if 'cell_size' in list(qosConfig[xonProfile].keys()):
             testParams["cell_size"] = qosConfig[xonProfile]["cell_size"]
+
+        self.set_test_params_descriptor_size(dutQosConfig, testParams)
 
         # Params required for generating a PFC Storm
         duthost = dutConfig["srcDutInstance"]
@@ -775,6 +779,8 @@ class TestQosSai(QosSaiBase):
         if 'cell_size' in list(qosConfig[xonProfile].keys()):
             testParams["cell_size"] = qosConfig[xonProfile]["cell_size"]
 
+        self.set_test_params_descriptor_size(dutQosConfig, testParams)
+
         self.runPtfTest(
             ptfhost, testCase="sai_qos_tests.PFCXonTest", testParams=testParams
         )
@@ -901,6 +907,10 @@ class TestQosSai(QosSaiBase):
         src_asic_index = get_src_dst_asic_and_duts['src_asic_index']
         dst_asic_index = get_src_dst_asic_and_duts['dst_asic_index']
 
+        if ('platform_asic' in dutTestParams["basicParams"] and
+                dutTestParams["basicParams"]["platform_asic"] == "broadcom"):
+            pytest.skip("No enough test ports on this DUT")
+
         if dutTestParams["basicParams"].get("platform_asic") == 'broadcom-dnx' \
                 and get_src_dst_asic_and_duts['src_dut'].facts.get('modular_chassis'):
             # for 100G port speed the number of ports required to fill headroom is huge,
@@ -982,6 +992,8 @@ class TestQosSai(QosSaiBase):
 
         if "pkts_num_trig_pfc_multi" in qosConfig["hdrm_pool_size"]:
             testParams.update({"pkts_num_trig_pfc_multi": qosConfig["hdrm_pool_size"]["pkts_num_trig_pfc_multi"]})
+
+        self.set_test_params_descriptor_size(dutQosConfig, testParams)
 
         if ('platform_asic' in dutTestParams["basicParams"] and
                 dutTestParams["basicParams"]["platform_asic"] == "broadcom-dnx"):
@@ -1331,6 +1343,8 @@ class TestQosSai(QosSaiBase):
 
         if "pkts_num_margin" in list(qosConfig["lossy_queue_1"].keys()):
             testParams["pkts_num_margin"] = qosConfig["lossy_queue_1"]["pkts_num_margin"]
+
+        self.set_test_params_descriptor_size(dutQosConfig, testParams)
 
         duthost = get_src_dst_asic_and_duts["src_dut"]
 
@@ -1846,6 +1860,8 @@ class TestQosSai(QosSaiBase):
         if "internal_hdr_size" in list(qosConfig.keys()):
             testParams["internal_hdr_size"] = qosConfig["internal_hdr_size"]
 
+        self.set_test_params_descriptor_size(dutQosConfig, testParams)
+
         self.runPtfTest(
             ptfhost, testCase="sai_qos_tests.PGSharedWatermarkTest",
             testParams=testParams
@@ -1911,6 +1927,8 @@ class TestQosSai(QosSaiBase):
 
         if "packet_size" in list(qosConfig["wm_pg_headroom"].keys()):
             testParams["packet_size"] = qosConfig["wm_pg_headroom"]["packet_size"]
+
+        self.set_test_params_descriptor_size(dutQosConfig, testParams)
 
         self.runPtfTest(
             ptfhost, testCase="sai_qos_tests.PGHeadroomWatermarkTest",
@@ -2124,6 +2142,8 @@ class TestQosSai(QosSaiBase):
         if "pkts_num_margin" in list(qosConfig[queueProfile].keys()):
             testParams["pkts_num_margin"] = qosConfig[queueProfile]["pkts_num_margin"]
 
+        self.set_test_params_descriptor_size(dutQosConfig, testParams)
+
         self.runPtfTest(
             ptfhost, testCase="sai_qos_tests.QSharedWatermarkTest",
             testParams=testParams
@@ -2155,7 +2175,8 @@ class TestQosSai(QosSaiBase):
         skip_test_on_no_lossless_pg(portSpeedCableLength)
         if dutTestParams["basicParams"]["sonic_asic_type"] == 'cisco-8000' or \
                 ('platform_asic' in dutTestParams["basicParams"] and
-                 dutTestParams["basicParams"]["platform_asic"] in ["broadcom-dnx", "mellanox", "marvell-teralynx"]):
+                 dutTestParams["basicParams"]["platform_asic"] in ["broadcom-dnx", "broadcom",
+                                                                   "mellanox", "marvell-teralynx"]):
             disableTest = False
         if disableTest:
             pytest.skip("DSCP to PG mapping test disabled")
@@ -2770,3 +2791,7 @@ class TestQosSai(QosSaiBase):
             self.check_and_set_ecn_status(duthost, qosConfig, 'on')
         elif ecn == "ecn_5":
             self.check_and_set_ecn_status(duthost, qosConfig, 'off')
+
+    def set_test_params_descriptor_size(self, dutQosConfig, testParams):
+        if 'descriptor_size' in dutQosConfig["param"]:
+            testParams["descriptor_size"] = dutQosConfig["param"]["descriptor_size"]
