@@ -1,9 +1,12 @@
 import argparse
 import datetime
 import getpass
+import io
 import json
 import os
+import copy
 import re
+import socket
 import subprocess
 import sys
 import telnetlib
@@ -20,8 +23,16 @@ import generate_spytest_html_report as html_report
 from run_scripts_remote import SUCCESS_STATUS, FAILURE_STATUS, FAILURE_RESONS
 # import access_pg_db
 
-# Avoid hardcoded python exec through out and have in single place
-PYTHON3 = "python3.8"
+# Invoke pyvxr's vxr.py with the same interpreter currently running this
+# orchestrator. The orchestrator is launched from inside the activated
+# pyats virtualenv (see Makefile run_spytest_parallel target), which is
+# the only Python on the agent where pyvxr and its dependencies are
+# installed. A previous hardcoded "python3.8" referred to a system Python
+# that has no pyvxr installed, so vxr.py would import-fail with a silent
+# exit 1 (output is captured by subprocess.run and not surfaced on
+# check=True). Using sys.executable matches the venv-aware behavior of
+# the surrounding "make clear_sim" target.
+PYTHON3 = sys.executable
 
 VXR_PORTS_FILENAME = "vxr_ports.yaml"
 RESULT_FOLDER_PATH = "/home/vxr/sonic-test/sonic-mgmt/spytest/spytest_results"
@@ -81,6 +92,24 @@ failed_test_dict = {}
 all_results = []
 failure_sims = []
 requeue_dict = {}
+# Buckets abandoned by WEDGE_TIMEOUT_SEC. Surfaced to main() so the run is
+# marked FAILED even when no result file is produced for the bucket.
+wedged_buckets = []
+
+
+# Maximum wall-clock for a single bucket's spytest invocation. When exceeded
+# the SSH channel is interrupted, the bucket is abandoned, and the SimThread
+# moves on. Override with SPYTEST_PARALLEL_WEDGE_TIMEOUT_SEC if a future test legitimately
+# needs a longer bound.
+WEDGE_TIMEOUT_SEC = int(os.environ.get("SPYTEST_PARALLEL_WEDGE_TIMEOUT_SEC", 9000))
+
+
+class WedgedCommandError(RuntimeError):
+    """Raised by execute_command_on_chan when a wall-clock-bounded command
+    exceeds its budget without emitting the completion marker. The SimThread
+    catches this and abandons the current bucket instead of hanging."""
+    pass
+
 
 class SimThread(threading.Thread):
     def __init__(self, topo_yaml, topology, platform, tar_ball, sim_dir):
@@ -121,6 +150,20 @@ class SimThread(threading.Thread):
 
                 rc, msg = run_sanity(self.topology, self.platform, task, self.sim_dir)
                 if rc != 0:
+                    # On a wedge: record the abandoned bucket so the run is
+                    # marked failed, and retire this sim to avoid burning
+                    # another WEDGE_TIMEOUT_SEC on a presumed-unhealthy DUT.
+                    if msg and msg.startswith("wedged:"):
+                        print(f"[WEDGE BOUND] sim {self.sim_name}: bucket {task} "
+                              f"abandoned after timeout; retiring sim. {msg}")
+                        wedged_buckets.append({
+                            "sim": self.sim_name,
+                            "task": task,
+                            "msg": msg,
+                        })
+                        task_queue.task_done()
+                        self.stop()
+                        return
                     print(f"error at run_sanity! msg: {msg}")
                     sys.exit(rc)
 
@@ -142,7 +185,7 @@ def _add_simulator_tags(vxr_yaml_file, args):
         data = yaml.safe_load(f)
 
     if "sim_host" not in data["simulation"]:
-        print(f"{args=}")
+        print(f"args={args}")
         if 'sim_host' not in args:
             return
         data["simulation"]['sim_host'] = args['sim_host']
@@ -152,8 +195,13 @@ def _add_simulator_tags(vxr_yaml_file, args):
     for item in range(1, args["num_of_threads"] + 1):
         filename = os.path.join("/nobackup", username, f"sim_{item}")
         nf = f"sim_{item}.yaml"
-        new_data = data
+        new_data = copy.deepcopy(data)
         new_data["simulation"]["sim_dir"] = filename
+        # pyvxr schema rejects None values for str fields; drop any Nones from simulation
+        sim_block = new_data["simulation"]
+        for _k in list(sim_block.keys()):
+            if sim_block[_k] is None:
+                del sim_block[_k]
         with open(nf, "w") as new_file:
             yaml.dump(new_data, new_file, sort_keys=False)
 
@@ -362,7 +410,7 @@ def send_topo_file_to_vxr(topology, platform, sim_dir):
     ports_config = get_ports_config(f"{sim_dir}/vxr_ports.yaml")
 
     topo_file = import_topo_file(topology, platform)
-    print(f"{topo_file=}")
+    print(f"topo_file={topo_file}")
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -378,6 +426,55 @@ def send_topo_file_to_vxr(topology, platform, sim_dir):
     client.close()
 
     return 0, ""
+
+
+_PY_CODING_RE = re.compile(rb"coding[=:]\s*([-\w.]+)")
+_UTF8_COOKIE = b"# -*- coding: utf-8 -*-\n"
+
+
+def _sanitized_py_bytes(local_path):
+    """Return UTF-8-cookied bytes for a .py file with non-ASCII content and
+    no PEP-263 encoding declaration; return None to upload the file as-is.
+
+    Without this, a DUT-side Python 2 parser raises SyntaxError on the file
+    and the test silently disappears from the run.
+    """
+    if not local_path.endswith(".py"):
+        return None
+    try:
+        with open(local_path, "rb") as f:
+            data = f.read()
+    except (IOError, OSError):
+        return None
+
+    try:
+        data.decode("ascii")
+        return None
+    except UnicodeDecodeError:
+        pass
+
+    head = data.split(b"\n", 2)[:2]
+    if any(_PY_CODING_RE.search(line) for line in head):
+        return None
+
+    if data.startswith(b"#!"):
+        nl = data.find(b"\n")
+        if nl == -1:
+            return data + b"\n" + _UTF8_COOKIE
+        return data[:nl + 1] + _UTF8_COOKIE + data[nl + 1:]
+    return _UTF8_COOKIE + data
+
+
+def _put_with_sanitize(ftp_client, local_path, remote_path, sanitized_log):
+    """SFTP-upload local_path; if it is a .py file with non-ASCII bytes and
+    no encoding cookie, upload a cookied copy instead. Records every
+    sanitization in `sanitized_log` for the operator log."""
+    cooked = _sanitized_py_bytes(local_path)
+    if cooked is None:
+        ftp_client.put(local_path, remote_path)
+        return
+    ftp_client.putfo(io.BytesIO(cooked), remote_path)
+    sanitized_log.append(local_path)
 
 
 def send_test_files_to_vxr(task, sim_dir):
@@ -396,15 +493,32 @@ def send_test_files_to_vxr(task, sim_dir):
     ftp_client = client.open_sftp()
     ftp_client.put(f"{task}", f"sonic-test/sonic-mgmt/spytest/{task}")
 
+    sanitized = []
     for root, subdirs, files in os.walk("../sonic-mgmt/spytest/templates"):
         exec_command_raise_error(client, f"mkdir -p sonic-test/sonic-mgmt/{root}")
         for file in files:
-            ftp_client.put(f"{root}/{file}", f"sonic-test/sonic-mgmt/{root}/{file}")
+            _put_with_sanitize(
+                ftp_client,
+                f"{root}/{file}",
+                f"sonic-test/sonic-mgmt/{root}/{file}",
+                sanitized,
+            )
 
     for root, subdirs, files in os.walk("../sonic-mgmt/spytest/tests"):
         exec_command_raise_error(client, f"mkdir -p sonic-test/sonic-mgmt/{root}")
         for file in files:
-            ftp_client.put(f"{root}/{file}", f"sonic-test/sonic-mgmt/{root}/{file}")
+            _put_with_sanitize(
+                ftp_client,
+                f"{root}/{file}",
+                f"sonic-test/sonic-mgmt/{root}/{file}",
+                sanitized,
+            )
+
+    if sanitized:
+        print(f"[UPLOAD] injected UTF-8 coding cookie into {len(sanitized)} "
+              f"non-ASCII .py file(s) before SFTP to DUT:")
+        for p in sanitized:
+            print(f"[UPLOAD]   {p}")
 
     ftp_client.close()
     client.close()
@@ -529,25 +643,69 @@ def configure_vxr(topology, platform, tar_ball, task, sim_dir):
     return 0, ""
 
 
-def execute_command_on_chan(chan, command="", show_output=False, sim_name=None):
+def execute_command_on_chan(chan, command="", show_output=False, sim_name=None,
+                            wedge_timeout_sec=None):
+    """Send `command` on an interactive SSH channel and block until the shell
+    emits the completion marker.
+
+    If `wedge_timeout_sec` is set the recv loop becomes wall-clock-supervised:
+    every ~30s recv slice is timed, and once total elapsed time exceeds the
+    budget the channel is interrupted (Ctrl-C twice, then `exit` to escape
+    nested docker/su shells) and a WedgedCommandError is raised. Callers are
+    expected to abandon further work on this channel after a wedge."""
     print(f"executing command: {command}")
     termination_command = '\necho "Command Completed, exit code is: $?"\n'
     termination_str = "Command Completed, exit code is:"
     chan.send(command + termination_command)
-    while True:
-        resp = chan.recv(9999).decode("utf-8")
-        if show_output:
-            print("resp: ", resp)
-        if termination_str in resp:
-            # the termination command command will show up initially in resp, ignore
-            if (
-                resp.count(termination_str) == 1
-                and "$?" in resp.split(termination_str)[1]
-            ):
-                continue
-            exit_code = resp.split(termination_str)[1]
-            print(f"Exit code for command {command} is: {exit_code}")
-            break
+
+    if wedge_timeout_sec is not None:
+        chan.settimeout(30.0)
+    start = time.monotonic()
+    try:
+        while True:
+            try:
+                resp = chan.recv(9999).decode("utf-8", errors="replace")
+            except socket.timeout:
+                resp = ""
+
+            if show_output and resp:
+                print("resp: ", resp)
+            if termination_str in resp:
+                # the termination command command will show up initially in resp, ignore
+                if (
+                    resp.count(termination_str) == 1
+                    and "$?" in resp.split(termination_str)[1]
+                ):
+                    continue
+                exit_code = resp.split(termination_str)[1]
+                print(f"Exit code for command {command} is: {exit_code}")
+                return
+
+            if (wedge_timeout_sec is not None
+                    and (time.monotonic() - start) > wedge_timeout_sec):
+                sim_label = sim_name or "<sim>"
+                elapsed = int(time.monotonic() - start)
+                print(f"[WEDGE BOUND] {sim_label}: command exceeded "
+                      f"{wedge_timeout_sec}s ({elapsed}s elapsed) without "
+                      f"completion marker. Sending Ctrl-C and abandoning task.")
+                # Two Ctrl-Cs to interrupt any nested process, then 'exit' twice
+                # to back out of `sudo su` and `docker exec` shells so the next
+                # bucket on this sim isn't trapped inside the container.
+                try:
+                    chan.send("\x03\x03\nexit\nexit\n")
+                except Exception as escape_err:
+                    print(f"[WEDGE BOUND] {sim_label}: failed to send escape "
+                          f"sequence: {escape_err}")
+                raise WedgedCommandError(
+                    f"command exceeded {wedge_timeout_sec}s on {sim_label}: "
+                    f"{command.strip()[:80]}"
+                )
+    finally:
+        if wedge_timeout_sec is not None:
+            try:
+                chan.settimeout(None)
+            except Exception:
+                pass
 
 
 def run_sanity(topology, platform, task, sim_dir):
@@ -583,7 +741,16 @@ def run_sanity(topology, platform, task, sim_dir):
         execute_command_on_chan(chan, cmd, show_output=True)
 
         cmd = f"env; /data/bin/spytest --testbed /data/topo --test-suite /data/{task}\n"
-        execute_command_on_chan(chan, cmd, show_output=True, sim_name=sim_name)
+        try:
+            execute_command_on_chan(chan, cmd, show_output=True, sim_name=sim_name,
+                                    wedge_timeout_sec=WEDGE_TIMEOUT_SEC)
+        except WedgedCommandError as wedge_err:
+            print(f"[WEDGE BOUND] {sim_name}: bucket abandoned ({wedge_err})")
+            try:
+                client.close()
+            except Exception:
+                pass
+            return -1, f"wedged: {wedge_err}"
 
     elif spt_or_ixia == "ixia":
         cmd = "docker exec -it ixia_sonic_mgmt bash\n"
@@ -613,7 +780,16 @@ def run_sanity(topology, platform, task, sim_dir):
         execute_command_on_chan(chan, cmd, show_output=True)
 
         cmd = f"env; /data/bin/spytest --testbed /data/topo --test-suite /data/{task}\n"
-        execute_command_on_chan(chan, cmd, show_output=True, sim_name=sim_name)
+        try:
+            execute_command_on_chan(chan, cmd, show_output=True, sim_name=sim_name,
+                                    wedge_timeout_sec=WEDGE_TIMEOUT_SEC)
+        except WedgedCommandError as wedge_err:
+            print(f"[WEDGE BOUND] {sim_name}: bucket abandoned ({wedge_err})")
+            try:
+                client.close()
+            except Exception:
+                pass
+            return -1, f"wedged: {wedge_err}"
     else:
         return -1, "ERROR! Could not find ixia or spt in pyvxr yaml file!"
 
@@ -713,6 +889,19 @@ def collect_result(sim_dir):
 
     test_start_time = extract_test_start_time(spytest_results_files)
 
+    # No results_*_summary.txt for this SIM: the per-summary loop below would
+    # not iterate and sum["status"] would default to success. Mark the run
+    # failed here so the zero-tests-collected case exits non-zero.
+    if not test_start_time:
+        print(
+            f"[collect_result] WARN: {sim_dir} produced no "
+            "results_*_summary.txt files; marking summary failed "
+            "(no_report_file)."
+        )
+        sum["status"] = FAILURE_STATUS
+        sum["failure_reason"] = FAILURE_RESONS.NO_REPORT_FILE
+        return 1, "no result files in spytest_result/"
+
     exec_command_raise_error(
         client,
         f"cd {RESULT_FOLDER_PATH}; echo cisco123 | sudo -S chmod -R 644 tmp* | true",
@@ -728,15 +917,15 @@ def collect_result(sim_dir):
 
     cmd = f"mkdir -p spytest_result"
     subprocess.run(
-        [cmd], cwd=sim_dir, shell=True, capture_output=True, text=True, check=True
+        [cmd], cwd=sim_dir, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True
     )
     cmd = f"tar -xvf spytest_result.tar.gz -C spytest_result"
     subprocess.run(
-        [cmd], cwd=sim_dir, shell=True, capture_output=True, text=True, check=True
+        [cmd], cwd=sim_dir, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True
     )
     cmd = f"tar -czvf vxr.out.tar.gz vxr.out"
     subprocess.run(
-        [cmd], cwd=sim_dir, shell=True, capture_output=True, text=True, check=True
+        [cmd], cwd=sim_dir, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True
     )
 
     ret = 0
@@ -868,7 +1057,10 @@ def collect_result(sim_dir):
                 )
                 sum["success_rate"] = round(sum["passed"] / (sum["total"] - sum["skipped"]) * 100, 2)
                 if sum["success_rate"] == 100:
-                    sum["status"] = SUCCESS_STATUS
+                    # Don't downgrade an existing failure (e.g. NO_REPORT_FILE
+                    # from an earlier SIM) to success on a later SIM's pass.
+                    if sum["status"] != FAILURE_STATUS:
+                        sum["status"] = SUCCESS_STATUS
                 else:
                     sum["status"] = FAILURE_STATUS
                     sum["failure_reason"] = FAILURE_RESONS.TEST_CASES_FAILED
@@ -900,8 +1092,9 @@ def cleanup(sim_dir):
         [f"{vxr_path} clean"],
         cwd=sim_dir,
         shell=True,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         check=True,
     )
 
@@ -1014,11 +1207,11 @@ def start_vxrs(topo_yaml, topology, platform, tar_ball, sim_dir):
     vxr_path = f"{PYTHON3} /auto/vxr/pyvxr/pyvxr-latest/vxr.py"
 
     result = subprocess.run(
-        ["pwd"], cwd=sim_dir, capture_output=True, text=True, check=True
+        ["pwd"], cwd=sim_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True
     )
     print(result.stdout)
     result = subprocess.run(
-        ["ls"], cwd=sim_dir, capture_output=True, text=True, check=True
+        ["ls"], cwd=sim_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True
     )
     print(f"Op={result.stdout}")
     # clean if any topo if already exists
@@ -1027,16 +1220,27 @@ def start_vxrs(topo_yaml, topology, platform, tar_ball, sim_dir):
         [f"{vxr_path} clean"],
         cwd=sim_dir,
         shell=True,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         check=True,
     )
 
     cmd = "bash -c '{} start {} |& tee sim_op.log'".format(vxr_path, topo_yaml)
     print(f"cmd: {cmd}")
+    print(f"DEBUG: yaml_path_arg={topo_yaml} yaml_exists={os.path.exists(os.path.join(sim_dir, topo_yaml))}")
     subprocess.run(
-        [cmd], cwd=sim_dir, shell=True, capture_output=True, text=True, check=True
+        [cmd], cwd=sim_dir, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True
     )
+
+    log_path = os.path.join(sim_dir, "sim_op.log")
+    if os.path.exists(log_path):
+        with open(log_path) as _f:
+            print(f"--- sim_op.log ({sim_dir}) BEGIN ---")
+            print(_f.read())
+            print(f"--- sim_op.log ({sim_dir}) END ---")
+    else:
+        print(f"DEBUG: {log_path} does not exist after vxr.py start!")
 
     # Sim up
     sim_output = subprocess.check_output(
@@ -1054,7 +1258,7 @@ def start_vxrs(topo_yaml, topology, platform, tar_ball, sim_dir):
 
     cmd = f"{vxr_path} ports > {VXR_PORTS_FILENAME}"
     subprocess.run(
-        [cmd], cwd=sim_dir, shell=True, capture_output=True, text=True, check=True
+        [cmd], cwd=sim_dir, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True
     )
 
     # Configure VXR with static files
@@ -1187,7 +1391,7 @@ def main():
             # sys.exit(0)
         os.makedirs(sim_dir, exist_ok=True)
         thread = threading.Thread(
-            target=start_vxrs, args=(f"../{topo_yaml}", topology, platform, tar_ball, sim_dir)
+            target=start_vxrs, args=(f"../sim_{i}.yaml", topology, platform, tar_ball, sim_dir)
         )
         threads.append(thread)
         thread.start()
@@ -1204,7 +1408,7 @@ def main():
             continue
         sim_dir = f"{cur_dir}/sim_{i}"
         sim_yaml = os.path.join(cur_dir, f'sim_{i}.yaml')
-        thread = SimThread(f"../{topo_yaml}", topology, platform, tar_ball, sim_dir)
+        thread = SimThread(f"../sim_{i}.yaml", topology, platform, tar_ball, sim_dir)
         exec_threads.append(thread)
         thread.start()
 
@@ -1218,22 +1422,26 @@ def main():
     # Stage 3: Collect logs from all topology run
     sim_exception_count = 0
     for i in range(1, NUM_OF_SIM + 1):
+        # Compute sim_dir per iteration so each SIM checks its own files.
+        sim_dir = f"{cur_dir}/sim_{i}"
         try:
             # Checking for ports file before collecting logs, in case sim never came up we will get exception
             get_ports_config(f"{sim_dir}/vxr_ports.yaml")
-            sim_dir = f"{cur_dir}/sim_{i}"
             rc, msg = collect_result(sim_dir)
             if rc != 0:
                 print(f"error at collect_result! msg: {msg}")
-        except Exception:
-            print(f"WARN: exception in SIM #{i}")
-            sim_exception_count =+ 1
+        except Exception as exc:
+            import traceback
+            print(f"WARN: exception in SIM #{i}: {type(exc).__name__}: {exc}")
+            print(f"WARN: traceback for SIM #{i}:\n{traceback.format_exc()}")
+            sim_exception_count += 1
             continue
 
     if sim_exception_count == NUM_OF_SIM:
+        # All SIMs failed: exit non-zero so the pipeline marks the run failed.
         print(f"None of the SIMs (NUM_OF_SIM:{NUM_OF_SIM}) came up; exiting")
         print(f"Waiting for logs check...")
-        return
+        sys.exit(1)
 
     test_data = {'script_data': all_results, 'failed_tc_data': failed_test_dict}
     with open(NEW_SUMMARY_REPORT_PATH, 'w') as file:
@@ -1241,7 +1449,18 @@ def main():
 
     print(f"{test_data}")
     parallel_log = os.path.basename(PARALLEL_LOG)
-    html_report.generate_test_report(all_results, failed_test_dict, log=parallel_log)
+    # generate_test_report returns False on empty script_data; honour it so
+    # the run is marked failed rather than passing on a stub report.
+    report_ok = html_report.generate_test_report(
+        all_results, failed_test_dict, log=parallel_log
+    )
+    if report_ok is False:
+        print(
+            "[main] HTML report generator received empty script_data; "
+            "forcing FAILURE_STATUS so this run reports red."
+        )
+        sum["status"] = FAILURE_STATUS
+        sum.setdefault("failure_reason", str(FAILURE_RESONS.NO_REPORT_FILE))
 
     for i in range(1, NUM_OF_SIM + 1):
         sim_dir = f"{cur_dir}/sim_{i}"
@@ -1260,6 +1479,16 @@ def main():
     sum["log_tarball_link"] = f"http://172.29.93.10/sonic-images/ringcicd/{prefix_unique_dir_name}/spytest_result_sim_1.tar.gz"
     # store the test execution report html for easier access via results summary
     sum["report_link"] = f"http://172.29.93.10/sonic-images/ringcicd/{prefix_unique_dir_name}/test_execution_report.html"
+
+    # Wedged buckets produce no result file; mark the run failed and record
+    # the abandoned bucket list before the summary is persisted so the
+    # on-disk summary matches the exit code.
+    if wedged_buckets:
+        print(f"[WEDGE BOUND] {len(wedged_buckets)} bucket(s) abandoned due "
+              f"to wedge timeout; forcing run status to failure. Details: "
+              f"{wedged_buckets}")
+        sum["status"] = FAILURE_STATUS
+        sum["wedged_buckets"] = wedged_buckets
 
     #generate report files for pipeline
     sum_f = open(SUMMARY_REPORT_PATH, "w")

@@ -91,6 +91,28 @@ def rest_of_operations(data, orig_data, failed_data, dest="./", sim_log=None):
     df = pd.DataFrame(data)
     orig_df = pd.DataFrame(orig_data)
 
+    # No script_data: write a stub report and return False so the caller
+    # can mark the run failed instead of exiting green on zero results.
+    if df.empty:
+        print(
+            "[generate_spytest_html_report] ERROR: script_data is empty -- "
+            "the per-SIM collect_result phase produced no results. Writing "
+            "stub report and signalling FAILURE to the caller."
+        )
+        stub_html = (
+            "<!DOCTYPE html><html><head><title>Test Execution Report - "
+            "NO DATA</title></head><body><h1>No results collected</h1>"
+            "<p>The orchestrator finished but no script_data was produced "
+            "(every SIM's collect_result raised, every bucket wedged, or "
+            "test collection failed).</p>"
+            "<p>This run is being reported as FAILED. Check the parallel-run "
+            "log for the actual per-SIM exception and traceback.</p>"
+            "</body></html>"
+        )
+        with open(f"{dest}/{report_file}", "w") as f:
+            f.write(stub_html)
+        return False
+
     # Format the 'Log File' column to be HTML links
     df["Log File"] = df["Log File"].apply(
         lambda x: (
@@ -165,6 +187,7 @@ def rest_of_operations(data, orig_data, failed_data, dest="./", sim_log=None):
         f.write(rendered_html)
 
     print(f"Test execution report generated: '{dest}/{report_file}'")
+    return True
 
 
 def failed_tc_df_map(testcase):
@@ -184,7 +207,9 @@ def process_script_dates(failed_data):
 def generate_test_report(scripts_data, failed_data, suite_data: dict = {}, sim_data: dict = {}, dest="./", log=None):
     new_failed_data = process_script_dates(failed_data)
     data = get_test_execution_data(scripts_data)
-    rest_of_operations(data, scripts_data, new_failed_data, dest=dest, sim_log=log)
+    # Returns True on success, False when no data was available so the caller
+    # (orchestrator) can mark the run failed instead of silently passing.
+    return rest_of_operations(data, scripts_data, new_failed_data, dest=dest, sim_log=log)
 
 if __name__ == '__main__':
     scripts_data, failed_data = {}, {}

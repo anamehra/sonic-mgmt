@@ -77,7 +77,7 @@ with open(topology_file, "r") as fd:
     build_id = os.getenv('BUILD_ID') or f"non_cicd_sanity_{str(time.time())}"
     job_base_name = os.getenv('JOB_BASE_NAME') or ""
     sonic_cicd_id = f"{job_base_name}_{build_id}"
-    goldencode = args.goldencode
+    goldencode = args.goldencode or os.environ.get("GOLDENCODE") or ""
     image_url = os.getenv('IMAGE_NAME') or ""
     
     sonic_test_branch = "unknown"

@@ -186,7 +186,7 @@ def init(result_dir=None):
         json.dump(test_data, file, indent=2)
 
     print(f"{test_data}")
-    print(f"{os.path.abspath(SUMMARY_REPORT_PATH)=}")
+    print(f"SUMMARY_REPORT_PATH={os.path.abspath(SUMMARY_REPORT_PATH)}")
     parallel_log = os.path.basename(PARALLEL_LOG)
     html_report.generate_test_report(all_results, failed_test_dict, dest=cur_dir, log=parallel_log)
 
