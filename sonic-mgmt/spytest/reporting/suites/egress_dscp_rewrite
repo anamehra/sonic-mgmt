@@ -1,0 +1,12 @@
+# Modules
++file:cisco/acl/test_acl_dscp_rewrite.py
+
+#Runtime Arguments
++args:--env SPYTEST_TOPOLOGY_STATUS_MAX_WAIT 300
++args:--device-feature-group=master
++args:--module-init-max-timeout=9000
++args:--tc-max-timeout=5400
++args:--max-time module 2400
++args:--max-time function 2400
++args:--logs-level=debug
++args:--random-order=0
