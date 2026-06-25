@@ -113,27 +113,16 @@ check_spytest_directory() {
 }
 
 show_usage() {
-    echo "Usage: $0 --testbed <ID> <command> [args]"
+    echo "This script is invoked internally by spytest_run.py."
+    echo "Do not run directly."
     echo ""
-    echo "Commands:"
-    echo "  <test_file>     Run specific test (path relative to qos/, e.g., ecn/test_v6_ecn_marking_l2_1node.py)"
-    echo "  full            Run all QoS tests"
-    echo ""
-    echo "Options:"
-    echo "  --testbed <ID>      Testbed ID (see below)"
-    echo "  --env KEY=VAL       Pass environment variable to container (repeatable)"
-    echo "  --logs-dir <path>   Custom directory for run logs (default: auto-generated)"
+    echo "Usage: python3 tools/spytest_run.py --testbed <ID> [options]"
     echo ""
     echo "Testbed IDs:"
     echo "  10000 = carib/siren (tortuga_2x2_Q200_testbed.yaml)"
-    echo "  10001 = laguna     (tortuga_2x2_G200_testbed.yaml)"
-    echo "  10002 = gamut      (gamut_2x2_qos.yaml)"
-    echo "  10003 = OCI        (rocev2_testbed.yaml)"
-    echo ""
-    echo "Examples:"
-    echo "  $0 --testbed 10002 full"
-    echo "  $0 --testbed 10001 scheduler/test_v4_dwrr_1node.py"
-    echo "  $0 --testbed 10003 full"
+    echo "  10001 = laguna      (tortuga_2x2_G200_testbed.yaml)"
+    echo "  10002 = gamut       (gamut_2x2_qos.yaml)"
+    echo "  10003 = OCI         (rocev2_testbed.yaml)"
 }
 
 do_setup() {
@@ -247,29 +236,24 @@ run_tests() {
         docker cp "${SCRIPT_DIR}/testbed_config.py" "$CONTAINER_NAME:/data/testbed_config.py"
 
         # Copy testbed YAML into container
-            local TB_BASE=$(basename "$TESTBED_YAML")
-            local TB_FULL=$(realpath "$TESTBED_YAML" 2>/dev/null || echo "$TESTBED_YAML")
-            if [ -f "$TB_FULL" ]; then
-                docker cp "$TB_FULL" "$CONTAINER_NAME:/data/$TB_BASE"
-            else
-                echo -e "${RED}Error: Testbed YAML not found: $TESTBED_YAML${NC}"
-                exit 1
-            fi
+        local TB_BASE=$(basename "$TESTBED_YAML")
+        local TB_FULL=$(realpath "$TESTBED_YAML" 2>/dev/null || echo "$TESTBED_YAML")
+        if [ -f "$TB_FULL" ]; then
+            docker cp "$TB_FULL" "$CONTAINER_NAME:/data/$TB_BASE"
+        else
+            echo -e "${RED}Error: Testbed YAML not found: $TESTBED_YAML${NC}"
+            exit 1
+        fi
 
-            # Pre-create logs directory on host (so it's owned by user, not root)
-            local LOGS_DIR_ARG=""
-            if [[ -n "$LOGS_DIR" ]]; then
-                mkdir -p "$PWD/$LOGS_DIR" 2>/dev/null || mkdir -p "$LOGS_DIR"
-                LOGS_DIR_ARG="--logs-dir $LOGS_DIR"
-            else
-                local AUTO_LOGS_DIR="run_logs_${PROFILE_SUFFIX_LC}_$(date '+%Y%m%d_%H%M%S')"
-                mkdir -p "$PWD/$AUTO_LOGS_DIR"
-                LOGS_DIR_ARG="--logs-dir /data/$AUTO_LOGS_DIR"
-            fi
+        # Pre-create logs directory on host (so it's owned by user, not root)
+        mkdir -p "$PWD/$SPYTEST_RUN_LOGS_DIR"
 
-            docker exec "${ENV_ARGS[@]}" "$CONTAINER_NAME" \
-                bash /data/run_test.sh --yaml "/data/$TB_BASE" $LOGS_DIR_ARG "${RUN_TEST_PATHS[@]}" < /dev/null
-            return $?
+        docker exec \
+            -e "SPYTEST_RUN_LOGS_DIR=$SPYTEST_RUN_LOGS_DIR" \
+            -e "SPYTEST_TESTBED_YAML=/data/$TB_BASE" \
+            "${ENV_ARGS[@]}" "$CONTAINER_NAME" \
+            bash /data/run_test.sh "${RUN_TEST_PATHS[@]}" < /dev/null
+        return $?
     fi
 
     # Inside container
@@ -306,12 +290,7 @@ run_tests() {
         fi
     fi
 
-    local RUN_LOGS_DIR
-    if [[ -n "$LOGS_DIR" ]]; then
-        RUN_LOGS_DIR="$LOGS_DIR"
-    else
-        RUN_LOGS_DIR="/data/run_logs_${PROFILE_SUFFIX_LC}_$(date '+%Y%m%d_%H%M%S')"
-    fi
+    local RUN_LOGS_DIR="/data/$SPYTEST_RUN_LOGS_DIR"
     mkdir -p "$RUN_LOGS_DIR"
     # Make logs directory writable for non-root users (container runs as root)
     chmod 777 "$RUN_LOGS_DIR"
@@ -341,40 +320,23 @@ run_tests() {
 }
 
 # ── Parse args ────────────────────────────────────────────────────────────
-TESTBED_YAML=""
-LOGS_DIR=""
 ENV_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --testbed)
-            # Resolve integer ID to YAML path
-            case "$2" in
-                10000) TESTBED_YAML="tortuga_2x2_Q200_testbed.yaml" ;;
-                10001) TESTBED_YAML="tortuga_2x2_G200_testbed.yaml" ;;
-                10002) TESTBED_YAML="gamut_2x2_qos.yaml" ;;
-                10003) TESTBED_YAML="rocev2_testbed.yaml" ;;
-                *) echo -e "${RED}Unknown testbed ID: $2${NC}"
-                   echo "Valid IDs: 10000=carib/siren, 10001=laguna, 10002=gamut, 10003=OCI"
-                   exit 1 ;;
-            esac
-            # Always copy from the canonical source: <repo_root>/spytest_tb_files/
-            _REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
-            _TB_DIR="${_REPO_ROOT}/spytest_tb_files"
-            if [[ ! -f "$_TB_DIR/$TESTBED_YAML" ]]; then
-                echo -e "${RED}Cannot find $TESTBED_YAML in $_TB_DIR${NC}"
-                exit 1
-            fi
-            TESTBED_YAML="$(realpath "$_TB_DIR/$TESTBED_YAML")"
-            shift 2 ;;
-        --yaml)     TESTBED_YAML="$2"; shift 2 ;;
-        --logs-dir) LOGS_DIR="$2"; shift 2 ;;
         --env)      ENV_ARGS+=(-e "$2"); export "$2"; shift 2 ;;
         -h|--help)  show_usage; exit 0 ;;
         *)          break ;;
     esac
 done
 
-[[ -z "$TESTBED_YAML" ]] && { show_usage; echo -e "\n${RED}Error: --testbed is required${NC}"; exit 1; }
+# ── Enforce invocation via spytest_run.py ──
+# spytest_run.py sets SPYTEST_RUN_LOGS_DIR and SPYTEST_TESTBED_YAML.
+if [[ -z "${SPYTEST_RUN_LOGS_DIR:-}" || -z "${SPYTEST_TESTBED_YAML:-}" ]]; then
+    echo -e "${RED}Error: Do not run run_test.sh directly.${NC}"
+    echo -e "${RED}Use:   python3 tools/spytest_run.py --testbed <ID> [options]${NC}"
+    exit 1
+fi
+TESTBED_YAML="$SPYTEST_TESTBED_YAML"
 
 # Look up testbed config from YAML filename
 TB_CONFIG_OUTPUT=$(read_tb_config "$TESTBED_YAML") || exit 1

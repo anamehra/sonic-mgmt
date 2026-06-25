@@ -162,13 +162,26 @@ def ecn_module_setup():
     tg.tg_topology_test_control(action='start_all_protocols')
     st.wait(10)
 
-    # Ping verify each TGEN endpoint -> DUT gateway
+    # Ping verify each TGEN endpoint -> DUT gateway with retry.
+    # IPv6 NDP resolution can take longer than 10s on some platforms.
+    max_ping_attempts = 3
     for idx in (1, 2, 3):
         gw = PORT_SUBNETS[idx]['dut']
         int_h = handles[tgen_ports[idx]]['int_handle']
-        ping_ok = vxlan_obj.ping_gateway(handles, tgen_ports[idx], gw, int_h)
+        ping_ok = False
+        for attempt in range(1, max_ping_attempts + 1):
+            ping_ok = vxlan_obj.ping_gateway(handles, tgen_ports[idx], gw, int_h)
+            if ping_ok:
+                break
+            if attempt < max_ping_attempts:
+                st.log(f"Ping attempt {attempt}/{max_ping_attempts} failed: "
+                       f"TGEN {tgen_ports[idx]} -> {gw}, retrying in 10s...")
+                st.wait(10)
         if not ping_ok:
-            st.report_fail('msg', f"Ping failed: TGEN {tgen_ports[idx]} -> {gw}")
+            st.report_fail(
+                'msg',
+                f"Ping failed after {max_ping_attempts} attempts: "
+                f"TGEN {tgen_ports[idx]} -> {gw}")
 
     # TGEN UDS ECN counters disabled  --  tg_custom_filter_config(mode='getstats')
     # calls packet_stats which triggers a fatal IXIA error (dirname required).

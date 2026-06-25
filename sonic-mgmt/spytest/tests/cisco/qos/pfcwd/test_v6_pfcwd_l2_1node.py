@@ -684,9 +684,21 @@ def pfcwd_module_setup():
     # Configure PFCWD based on DEVICE_METADATA default_pfcwd_status
     configure_pfcwd(dut, config)
 
-    # Verify PFCWD is configured on egress port
+    # Verify PFCWD is configured on egress port.
+    # On some platforms (e.g. Q200/carib), 'pfcwd start_default' silently
+    # configures 0 ports because the platform QoS template does not generate
+    # PFC_WD table entries in CONFIG_DB.  Fall back to explicit start.
     if not verify_pfcwd_config_on_port(dut, dut_ports[3]):
-        st.report_fail('msg', f"PFCWD not configured on egress port {dut_ports[3]}")
+        st.log("PFCWD not configured after start_default - "
+               "platform may lack PFC_WD defaults, using explicit start")
+        cmd = "sudo pfcwd start --action drop --restoration-time 400 all 400"
+        st.config(dut, cmd, skip_error_check=True)
+        st.wait(3)
+        if not verify_pfcwd_config_on_port(dut, dut_ports[3]):
+            st.report_fail(
+                'msg',
+                f"PFCWD not configured on egress port {dut_ports[3]} "
+                f"after start_default and explicit start")
 
     # Verify PFC and PFCWD software monitoring are enabled in PORT_QOS_MAP
     # on the egress port. ``show pfcwd config`` only reports the per-port

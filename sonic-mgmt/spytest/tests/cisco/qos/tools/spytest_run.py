@@ -343,6 +343,17 @@ def wait_for_dut(dut, max_wait=600, interval=30):
     return False
 
 
+def reboot_dut(dut):
+    """Issue 'sudo reboot' on a DUT via SSH."""
+    log.info("  Rebooting %s (%s)...", dut["name"], dut["ip"])
+    try:
+        remote_ssh(dut["ip"], dut["user"], dut["password"],
+                   "sudo reboot", timeout=30)
+    except subprocess.TimeoutExpired:
+        pass  # Expected -- SSH drops during reboot
+    return dut
+
+
 def wait_for_containers(dut, max_wait=180, interval=10):
     """Wait for critical SONiC containers to be running."""
     critical_containers = ["swss", "bgp", "syncd"]
@@ -436,14 +447,17 @@ def transfer_logs(tb, local_log_dir, branch, build_id, log_server, tb_config):
     return remote_path
 
 
-def cleanup_local_logs(local_log_dir):
+def cleanup_local_logs(local_log_dir, container_name=None):
     """Remove local log directory after publish is done."""
     if not os.path.isdir(local_log_dir):
         return
-    # chmod first so rm doesn't need sudo (docker creates root-owned files)
-    subprocess.run(["chmod", "-R", "777", str(local_log_dir)], capture_output=True, text=True)
+    # Docker creates root-owned files. chmod via docker exec (as root) before rm.
+    if container_name:
+        subprocess.run(["docker", "exec", container_name, "chmod", "-R", "777",
+                        f"/data/{os.path.basename(local_log_dir)}"],
+                       capture_output=True, text=True)
     rm = subprocess.run(["rm", "-rf", str(local_log_dir)], capture_output=True, text=True)
-    if rm.returncode != 0:
+    if rm.returncode != 0 or os.path.isdir(local_log_dir):
         log.warning("  Could not remove local logs (root-owned): %s", local_log_dir)
     else:
         log.info("  [OK] Local logs removed: %s", local_log_dir)
@@ -599,6 +613,58 @@ def run_one_testbed(yaml_file, cfg, tb_config):
     else:
         log.info("=== Phase 1: Upgrade SKIPPED ===")
 
+    # -- Phase 1.2: Pre-test reboot (for DUTs not already rebooted by upgrade) --
+    do_reboot = cfg.get("reboot", False)
+    if do_reboot:
+        # Determine which DUTs were already rebooted by upgrade
+        if not skip_upgrade:
+            reboot_duts = [d for d in duts if d not in upgrade_duts]
+        else:
+            reboot_duts = list(duts)
+
+        if reboot_duts:
+            log.info("=== Phase 1.2: Rebooting %d non-upgraded DUT(s) ===", len(reboot_duts))
+            for d in reboot_duts:
+                log.info("  Target: %s (%s)", d["name"], d["ip"])
+
+            # Reboot in parallel
+            with ThreadPoolExecutor(max_workers=len(reboot_duts)) as pool:
+                futures = [pool.submit(reboot_dut, d) for d in reboot_duts]
+                for f in as_completed(futures):
+                    f.result()
+
+            # Wait for them to come back
+            log.info("  Waiting for rebooted DUTs to come back...")
+            time.sleep(15)  # Brief pause before polling
+
+            def _wait_reboot(d):
+                return d, wait_for_dut(d)
+
+            failed = 0
+            with ThreadPoolExecutor(max_workers=len(reboot_duts)) as pool:
+                futures = [pool.submit(_wait_reboot, d) for d in reboot_duts]
+                for f in as_completed(futures):
+                    d, ok = f.result()
+                    if not ok:
+                        failed += 1
+
+            if failed:
+                log.error("%d DUT(s) failed to come back after reboot. Aborting.", failed)
+                return False, int((time.time() - start) / 60)
+
+            # Wait for containers
+            log.info("  Waiting for containers on rebooted DUTs...")
+            with ThreadPoolExecutor(max_workers=len(reboot_duts)) as pool:
+                futures = [pool.submit(wait_for_containers, d) for d in reboot_duts]
+                for f in as_completed(futures):
+                    f.result()
+
+            log.info("  [OK] All rebooted DUTs ready")
+        else:
+            log.info("=== Phase 1.2: Reboot SKIPPED (all DUTs already rebooted by upgrade) ===")
+    else:
+        log.info("=== Phase 1.2: Reboot SKIPPED (--reboot not specified) ===")
+
     # -- Phase 1.5: Push base configs --
     skip_config = cfg.get("skip_config", False)
     base_config_dir_name = tb_config.get("base_config_dir", "")
@@ -651,23 +717,26 @@ def run_one_testbed(yaml_file, cfg, tb_config):
     log.info("=== Phase 2: Running tests (%s) on %s ===", test, tb)
 
     profile_suffix = tb_config.get("profile_suffix", "unknown")
+    # Compute a unique run_logs directory name and pass it to run_test.sh
+    run_logs_name = f"run_logs_{tb}_{int(time.time())}"
+    run_env = os.environ.copy()
+    run_env["SPYTEST_RUN_LOGS_DIR"] = run_logs_name
+    run_env["SPYTEST_TESTBED_YAML"] = str(yaml_file)
+
     # Split test string into separate arguments for multiple tests
     test_args = test.split() if test else ["full"]
-    cmd = [str(RUNNER_SCRIPT), "--yaml", str(yaml_file)] + test_args
+    cmd = [str(RUNNER_SCRIPT)] + test_args
     log.info("Running: %s", " ".join(cmd))
 
-    test_proc = subprocess.run(cmd, cwd=spytest_dir, stdin=subprocess.DEVNULL)
+    test_proc = subprocess.run(cmd, cwd=spytest_dir, stdin=subprocess.DEVNULL, env=run_env)
     test_rc = test_proc.returncode
 
     # -- Phase 3: Transfer logs (only when --publish is specified) --
     log.info("=== Phase 3: Transferring logs ===")
-    # run_test.sh names the log dir using profile_suffix (lowercase)
-    run_log_dirs = sorted(glob.glob(str(spytest_dir / f"run_logs_{profile_suffix.lower()}_*")), reverse=True)
-    latest_log_dir = None
+    latest_log_dir = str(spytest_dir / run_logs_name) if os.path.isdir(spytest_dir / run_logs_name) else None
     remote_logs_path = None
     do_publish = cfg.get("publish")
-    if run_log_dirs:
-        latest_log_dir = run_log_dirs[0]
+    if latest_log_dir:
         # Write version info so standalone spytest_publish.py can find it
         _write_version_info(latest_log_dir, tb_branch, tb_build_id)
         if do_publish and LOG_SERVER:
@@ -678,8 +747,7 @@ def run_one_testbed(yaml_file, cfg, tb_config):
         else:
             log.warning("No log_server configured; logs remain at %s", latest_log_dir)
     else:
-        log.warning("No run_logs directory found for %s (suffix=%s) under %s",
-                    tb, profile_suffix.lower(), spytest_dir)
+        log.warning("No run_logs directory found: %s", spytest_dir / run_logs_name)
 
     # -- Phase 4: Publish to dashboard (before local cleanup) --
     if do_publish and latest_log_dir and os.path.isdir(latest_log_dir):
@@ -734,7 +802,8 @@ def run_one_testbed(yaml_file, cfg, tb_config):
 
     # -- Remove local run_logs directory (only after successful publish) --
     if do_publish and latest_log_dir and os.path.isdir(latest_log_dir):
-        cleanup_local_logs(latest_log_dir)
+        container_name = f"{tb_config.get('container_prefix', 'spytest')}_{os.environ.get('USER', 'unknown')}"
+        cleanup_local_logs(latest_log_dir, container_name)
 
     duration = int((time.time() - start) / 60)
     if test_rc == 0:
@@ -766,6 +835,8 @@ def schedule_run(args):
         cmd_parts.extend(["--spine-url", args.spine_url])
     if args.skip_config:
         cmd_parts.append("--skip-config")
+    if args.reboot:
+        cmd_parts.append("--reboot")
     if args.publish:
         cmd_parts.append("--publish")
     if args.test:
@@ -836,9 +907,7 @@ Examples:
   %(prog)s --testbed 10002 --url <url> --schedule 2
 """,
     )
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--testbed", type=int, metavar="ID", help="Testbed ID (see list below)")
-    group.add_argument("--yaml", help=argparse.SUPPRESS)  # internal/undocumented
+    parser.add_argument("--testbed", type=int, metavar="ID", required=True, help="Testbed ID (see list below)")
     parser.add_argument("--branch", help="Git branch to checkout before running")
     parser.add_argument("--url", help="Image URL for DUT upgrade")
     parser.add_argument("--spine-url", help="Separate image URL for spines")
@@ -846,6 +915,8 @@ Examples:
     parser.add_argument("--publish", action="store_true", help="Publish results to dashboard (default: no publish)")
     parser.add_argument("--test", default="full", help="Test file(s) or 'full' (default: full)")
 
+    parser.add_argument("--reboot", action="store_true",
+                        help="Reboot DUTs before tests (skipped for DUTs upgraded via --url/--spine-url)")
     parser.add_argument("--schedule", type=float, metavar="HOURS",
                         help="Schedule run N hours from now (creates crontab entry and exits)")
 
@@ -856,20 +927,17 @@ Examples:
     args = parser.parse_args()
 
     # Resolve --testbed <int> to YAML path
-    if args.testbed is not None:
-        entry = TESTBED_IDS.get(args.testbed)
-        if not entry:
-            parser.error(
-                f"Unknown testbed ID: {args.testbed}\nValid IDs:\n" +
-                "\n".join(f"  {tid} = {desc} ({yname})" for tid, (yname, desc) in sorted(TESTBED_IDS.items()))
-            )
-        yaml_name = entry[0]
-        try:
-            yaml_path = find_testbed_yaml(yaml_name)
-        except ValueError as e:
-            parser.error(str(e))
-    else:
-        yaml_path = Path(args.yaml).resolve()
+    entry = TESTBED_IDS.get(args.testbed)
+    if not entry:
+        parser.error(
+            f"Unknown testbed ID: {args.testbed}\nValid IDs:\n" +
+            "\n".join(f"  {tid} = {desc} ({yname})" for tid, (yname, desc) in sorted(TESTBED_IDS.items()))
+        )
+    yaml_name = entry[0]
+    try:
+        yaml_path = find_testbed_yaml(yaml_name)
+    except ValueError as e:
+        parser.error(str(e))
 
     # Validate YAML exists
     if not yaml_path.is_file():
@@ -895,6 +963,7 @@ Examples:
         "test": args.test,
         "skip_upgrade": not args.url,
         "skip_config": args.skip_config,
+        "reboot": args.reboot,
         "branch": args.branch or "",
         "publish": args.publish,
     }
