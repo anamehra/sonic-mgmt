@@ -133,14 +133,16 @@ def test_live_addon_docker_image_upgrade(
     pre_cores = lad.get_core_filenames(duthost)
     public_reg = request.config.getoption("--public_docker_registry")
     registry_host = _cli_registry_host(request)
-    baseline_cfg = None
-    target_cfg = None
-
-    try:
-        baseline_cfg = lad.apply_image_tag_to_config(cfg_base, baseline_tag)
-        lad.prepare_live_addon_docker_install(
-            duthost, baseline_cfg, lad.InstallSource("image_present", None, None)
+    baseline_cfg = lad.apply_image_tag_to_config(cfg_base, baseline_tag)
+    target_cfg = lad.apply_image_tag_to_config(cfg_base, upgrade_tag)
+    if target_cfg["docker_run"]["image_ref"] == baseline_cfg["docker_run"]["image_ref"]:
+        pytest.skip(
+            "Upgrade tag {!r} matches baseline tag {!r}; use different "
+            "--live_addon_docker_image_upgrade_tag".format(upgrade_tag, baseline_tag)
         )
+
+    container_started = False
+    try:
         baseline_cfg, (ok, code, body) = lad.upgrade_live_addon_docker_image(
             duthost,
             baseline_cfg,
@@ -153,17 +155,11 @@ def test_live_addon_docker_image_upgrade(
                 code, body
             ),
         )
+        container_started = True
         logger.info(
             "Baseline live-addon image installed at %s",
             baseline_cfg["docker_run"]["image_ref"],
         )
-
-        target_cfg = lad.apply_image_tag_to_config(cfg_base, upgrade_tag)
-        if target_cfg["docker_run"]["image_ref"] == baseline_cfg["docker_run"]["image_ref"]:
-            pytest.skip(
-                "Upgrade tag {!r} matches baseline tag {!r}; use different "
-                "--live_addon_docker_image_upgrade_tag".format(upgrade_tag, baseline_tag)
-            )
 
         target_cfg, (ok, code, body) = lad.upgrade_live_addon_docker_image(
             duthost,
@@ -176,10 +172,11 @@ def test_live_addon_docker_image_upgrade(
             "Health check after image upgrade failed: http_code={} body={}".format(code, body),
         )
     finally:
-        try:
-            dr = (target_cfg or baseline_cfg or cfg_base).get("docker_run") or {}
-            if dr.get("container_name"):
-                lad.docker_manual_teardown(duthost, dr)
-        except Exception as exc:
-            logger.warning("Upgrade test teardown command failed: %s", exc)
-        lad.verify_post_teardown(duthost, cfg_base, pre_cores)
+        if container_started:
+            try:
+                dr = (target_cfg or baseline_cfg or cfg_base).get("docker_run") or {}
+                if dr.get("container_name"):
+                    lad.docker_manual_teardown(duthost, dr)
+            except Exception as exc:
+                logger.warning("Upgrade test teardown command failed: %s", exc)
+            lad.verify_post_teardown(duthost, cfg_base, pre_cores)

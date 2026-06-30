@@ -144,8 +144,9 @@ pre-loaded-image fallbacks. It always registry-pulls using explicit CLI tags:
 
 ```mermaid
 flowchart TD
-    U0[apply_image_tag_to_config baseline tag] --> U0b[prepare_live_addon_docker_install teardown only]
-    U0b --> U1[registry pull baseline image]
+    U0[apply_image_tag_to_config baseline and upgrade tags] --> U0c{same image_ref?}
+    U0c -->|yes| Uskip[pytest.skip]
+    U0c -->|no| U1[registry pull baseline image]
     U1 --> U2[version_matrix check]
     U2 --> U3[teardown + rmi stale refs]
     U3 --> U4[docker run + post-start + HTTP health]
@@ -307,8 +308,8 @@ Each row may include:
 
 - `pytest.skip` when `--live_addon_docker_image_tag` is omitted (before any DUT steps)
 - `pytest.skip` when `--live_addon_docker_image_upgrade_tag` is omitted (before any DUT steps)
-- `pytest.skip` when upgrade tag resolves to the same `docker_run.image_ref` as baseline (after
-  baseline install, before the upgrade pull)
+- `pytest.skip` when baseline and upgrade tags resolve to the same `docker_run.image_ref` (before
+  any DUT steps; compared from config only)
 
 **Upgrade test and `version_matrix`:** `upgrade_live_addon_docker_image` pulls from the registry,
 runs `require_version_matrix_or_skip` on the pulled ref, then tears down the container. If the
