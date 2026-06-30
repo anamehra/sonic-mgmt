@@ -40,14 +40,19 @@ Post-start validation is **not** duplicated in pytest cases; it runs in the modu
 |------|-----------|
 | `test_live_addon_docker_health_http` | HTTP `/health` returns expected status within probe timeout |
 | `test_live_addon_docker_health_after_config_reload_cycle` | Stop container → `config reload` → `docker run` + full post-start → `config reload` → teardown + `docker run` + restart post-start (120s supervisord) → HTTP health |
+| `test_live_addon_docker_image_upgrade` | Registry pull baseline (`--live_addon_docker_image_tag`) → post-start + health → pull upgrade (`--live_addon_docker_image_upgrade_tag`) → post-start + health (standalone; does not use module fixture) |
 
 **Module fixture** `live_addon_docker_setup_teardown`: install once per module, `docker run`,
 `verify_live_addon_post_start` (full readiness), yield `(duthost, cfg)`, then teardown and
 post-teardown checks.
 
+**Image upgrade test** (`test_live_addon_docker_image_upgrade`) is standalone: it uses
+`live_addon_docker_vendor_cfg_raw`, requires both CLI image tags and registry access, and calls
+`upgrade_live_addon_docker_image` twice (baseline then upgrade).
+
 **Typical runtime (Cisco):** first start may wait up to **900s** for startup logs; config-reload
-cycle adds another full post-start plus a **120s** supervisord poll on restart; HTTP health polls
-up to **900s** when needed.
+cycle adds another full post-start plus a **120s** supervisord poll on restart; upgrade test runs
+two full install cycles; HTTP health polls up to **900s** when needed.
 
 **Topology:** tests are marked `pytest.mark.topology("any")`. Use `-t any` or `-t t1,any` with
 `run_tests.sh` (a bare `-t t1` skips these tests).
@@ -132,6 +137,25 @@ flowchart TD
     O --> P[Run tests]
     P --> Q[Teardown and post checks]
 ```
+
+**Image upgrade test** (`test_live_addon_docker_image_upgrade`) does not use tarball or
+pre-loaded-image fallbacks. It always registry-pulls using explicit CLI tags:
+
+```mermaid
+flowchart TD
+    U0[apply_image_tag_to_config baseline tag] --> U1[registry pull baseline image]
+    U1 --> U2[version_matrix check]
+    U2 --> U3[teardown + rmi stale refs]
+    U3 --> U4[docker run + post-start + HTTP health]
+    U4 --> U5[apply_image_tag_to_config upgrade tag]
+    U5 --> U6[registry pull upgrade image]
+    U6 --> U7[version_matrix check]
+    U7 --> U8[teardown + rmi stale refs keep pulled ref]
+    U8 --> U9[docker run + post-start + HTTP health]
+```
+
+`version_matrix` runs after pull and **before** container teardown during upgrade, so a skip leaves
+the previously running live-addon container in place.
 
 Registry host comes from Ansible `docker_registry_host` or pytest `live_addon_docker_registry`
 (see §7). Tarball path on the DUT is `dut_tarball_home` plus `tarball_filename` from JSON.
@@ -277,6 +301,17 @@ Each row may include:
 - Matching row has no `compatible_sonic_globs`
 - DUT SONiC does not match any allowed glob
 
+**Upgrade test skip conditions** (in `test_live_addon_docker_image_upgrade`, before any DUT mutation):
+
+- `pytest.skip` when `--live_addon_docker_image_tag` is omitted (baseline tag required)
+- `pytest.skip` when `--live_addon_docker_image_upgrade_tag` is omitted
+- `pytest.skip` when upgrade tag resolves to the same `docker_run.image_ref` as baseline
+
+**Upgrade test and `version_matrix`:** `upgrade_live_addon_docker_image` pulls from the registry,
+runs `require_version_matrix_or_skip` on the pulled ref, then tears down the container. If the
+matrix check skips, the prior container (if any) is left running and the test ends without applying
+the incompatible upgrade image.
+
 Images built without `com.azure.sonic.manifest` skip until the build pipeline adds standard SONiC
 docker labels.
 
@@ -308,8 +343,9 @@ post-teardown checks.
 
 **Image upgrade test** uses `live_addon_docker_vendor_cfg_raw` and requires
 `--live_addon_docker_image_tag`, `--live_addon_docker_image_upgrade_tag`, and registry access.
-Each step calls `upgrade_live_addon_docker_image` (teardown, `docker rmi`, registry pull,
-`docker run`, post-start, HTTP health).
+Each step calls `upgrade_live_addon_docker_image` (registry pull, `version_matrix` check,
+teardown, `docker rmi` of stale refs, `docker run`, post-start, HTTP health). See §9 for skip
+conditions. No `config reload` in this test; default loganalyzer is sufficient.
 
 **Typical runtime (Cisco):** first start may wait up to **900s** for startup logs; config-reload
 cycle adds another full post-start plus a **120s** supervisord poll on restart; upgrade test runs
