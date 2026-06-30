@@ -25,6 +25,7 @@ live in per-ASIC JSON files under `tests/live_addon_docker/files/`.
 | HTTP health endpoint probe from the DUT | Building or publishing docker images |
 | Post-start checks via `verify_live_addon_post_start` (logs and/or supervisord) | Shared tarball distribution between vendors |
 | Optional `version_matrix` skip for image vs SONiC compatibility | |
+| Registry image upgrade test (`test_live_addon_docker_image_upgrade`) | |
 | Registry override per test run (`--live_addon_docker_registry`) | |
 
 **Platform filter:** `asic_type=cisco-8000` only (see
@@ -143,7 +144,8 @@ pre-loaded-image fallbacks. It always registry-pulls using explicit CLI tags:
 
 ```mermaid
 flowchart TD
-    U0[apply_image_tag_to_config baseline tag] --> U1[registry pull baseline image]
+    U0[apply_image_tag_to_config baseline tag] --> U0b[prepare_live_addon_docker_install teardown only]
+    U0b --> U1[registry pull baseline image]
     U1 --> U2[version_matrix check]
     U2 --> U3[teardown + rmi stale refs]
     U3 --> U4[docker run + post-start + HTTP health]
@@ -301,11 +303,12 @@ Each row may include:
 - Matching row has no `compatible_sonic_globs`
 - DUT SONiC does not match any allowed glob
 
-**Upgrade test skip conditions** (in `test_live_addon_docker_image_upgrade`, before any DUT mutation):
+**Upgrade test skip conditions** (in `test_live_addon_docker_image_upgrade`):
 
-- `pytest.skip` when `--live_addon_docker_image_tag` is omitted (baseline tag required)
-- `pytest.skip` when `--live_addon_docker_image_upgrade_tag` is omitted
-- `pytest.skip` when upgrade tag resolves to the same `docker_run.image_ref` as baseline
+- `pytest.skip` when `--live_addon_docker_image_tag` is omitted (before any DUT steps)
+- `pytest.skip` when `--live_addon_docker_image_upgrade_tag` is omitted (before any DUT steps)
+- `pytest.skip` when upgrade tag resolves to the same `docker_run.image_ref` as baseline (after
+  baseline install, before the upgrade pull)
 
 **Upgrade test and `version_matrix`:** `upgrade_live_addon_docker_image` pulls from the registry,
 runs `require_version_matrix_or_skip` on the pulled ref, then tears down the container. If the
@@ -334,7 +337,7 @@ Post-start validation is **not** duplicated in pytest cases; it runs in the fixt
 | Test | Validates |
 |------|-----------|
 | `test_live_addon_docker_health_http` | HTTP `/health` returns expected status within probe timeout |
-| `test_live_addon_docker_health_after_config_reload_cycle` | Stop container → `config reload` → wait 60s → `docker run` + full post-start → `config reload` → teardown + `docker run` + restart post-start (120s supervisord) → HTTP health |
+| `test_live_addon_docker_health_after_config_reload_cycle` | Stop container → `config reload` → `docker run` + full post-start → `config reload` → teardown + `docker run` + restart post-start (120s supervisord) → HTTP health |
 | `test_live_addon_docker_image_upgrade` | Registry pull baseline (`--live_addon_docker_image_tag`) → post-start + health → pull upgrade (`--live_addon_docker_image_upgrade_tag`) → post-start + health (standalone; skips without both CLI tags) |
 
 **Module fixture** `live_addon_docker_setup_teardown`: install once per module, `docker run`,
