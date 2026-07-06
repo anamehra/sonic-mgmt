@@ -149,13 +149,13 @@ def test_live_addon_docker_image_upgrade(
             public_docker_registry=public_reg,
             docker_registry_host_override=registry_host,
         )
+        container_started = True
         pytest_assert(
             ok,
             "Baseline health check failed before image upgrade: http_code={} body={}".format(
                 code, body
             ),
         )
-        container_started = True
         logger.info(
             "Baseline live-addon image installed at %s",
             baseline_cfg["docker_run"]["image_ref"],
