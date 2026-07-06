@@ -1337,10 +1337,25 @@ def upgrade_live_addon_docker_image(
 
     cfg_run = copy.deepcopy(cfg)
     cfg_run["docker_run"]["image_ref"] = ref
-    docker_run_manual(duthost, cfg_run)
-    verify_live_addon_post_start(duthost, cfg_run)
-    health = wait_for_health_ready(duthost, cfg_run["health"])
-    return cfg_run, health
+
+    cleanup_on_error = False
+    try:
+        cleanup_on_error = True
+        docker_run_manual(duthost, cfg_run)
+        verify_live_addon_post_start(duthost, cfg_run)
+        health = wait_for_health_ready(duthost, cfg_run["health"])
+        cleanup_on_error = False
+        return cfg_run, health
+    except BaseException:
+        if cleanup_on_error:
+            try:
+                docker_manual_teardown(duthost, cfg_run["docker_run"])
+            except Exception as exc:
+                logger.warning(
+                    "Upgrade helper cleanup failed after start error: %s",
+                    exc,
+                )
+        raise
 
 
 def docker_manual_teardown(duthost, docker_run_cfg):
